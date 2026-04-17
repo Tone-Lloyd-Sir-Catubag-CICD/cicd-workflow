@@ -1,0 +1,287 @@
+name: "Reusable: Web UAT"
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        required: true
+        type: string
+        description: "Display name for the service"
+      service-path:
+        required: false
+        type: string
+        default: "."
+        description: "Directory that contains the service"
+      node-version:
+        required: false
+        type: string
+        default: "24"
+        description: "Node.js version"
+      package-manager:
+        required: false
+        type: string
+        default: "auto"
+        description: "Package manager override (auto|npm|yarn|pnpm)"
+      install-command:
+        required: false
+        type: string
+        default: ""
+        description: "Dependency installation command for Playwright"
+      require-approval:
+        required: false
+        type: boolean
+        default: true
+        description: "Require UAT environment approval"
+      environment-name:
+        required: false
+        type: string
+        default: "uat"
+        description: "Environment name used for UAT approval"
+      uat-deploy-command:
+        required: false
+        type: string
+        default: ""
+        description: "Optional deployment command executed before UAT checks"
+      uat-base-url:
+        required: false
+        type: string
+        default: ""
+        description: "Base URL for UAT tests"
+      uat-healthcheck-url:
+        required: false
+        type: string
+        default: ""
+        description: "Optional URL to poll before running UAT checks"
+      uat-timeout-seconds:
+        required: false
+        type: number
+        default: 300
+        description: "Maximum time to wait for the UAT endpoint"
+      run-playwright:
+        required: false
+        type: boolean
+        default: true
+        description: "Run Playwright UAT checks"
+      playwright-command:
+        required: false
+        type: string
+        default: "npx playwright test --project={browser}"
+        description: "Playwright command; use {browser} to receive the matrix browser"
+      playwright-tests-directory:
+        required: false
+        type: string
+        default: "tests/e2e"
+        description: "Playwright test folder"
+      playwright-browsers:
+        required: false
+        type: string
+        default: "[\"chromium\"]"
+        description: "Browser list as JSON array or CSV"
+      run-k6:
+        required: false
+        type: boolean
+        default: false
+        description: "Run local k6 smoke or performance checks"
+      k6-command:
+        required: false
+        type: string
+        default: ""
+        description: "Optional k6 command override"
+      k6-script-path:
+        required: false
+        type: string
+        default: "tests/performance"
+        description: "k6 script or directory path"
+
+permissions:
+  contents: read
+
+jobs:
+  approval-required:
+    name: "UAT Approval"
+    if: ${{ inputs.require-approval }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: ${{ inputs.environment-name }}
+    steps:
+      - name: Record Approval
+        run: echo "UAT approval granted for ${{ inputs.service-name }}."
+
+  approval-skipped:
+    name: "UAT Approval Skipped"
+    if: ${{ !inputs.require-approval }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Continue Without Approval
+        run: echo "UAT approval bypassed for ${{ inputs.service-name }}."
+
+  deploy-uat:
+    name: "Deploy to UAT"
+    if: >-
+      always() &&
+      inputs.uat-deploy-command != '' &&
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs:
+      - approval-required
+      - approval-skipped
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: ./${{ inputs.service-path }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Run UAT Deployment Command
+        env:
+          BASE_URL: ${{ inputs.uat-base-url }}
+          UAT_BASE_URL: ${{ inputs.uat-base-url }}
+        run: |
+          echo "Deploying ${{ inputs.service-name }} to UAT..."
+          bash -lc "${{ inputs.uat-deploy-command }}"
+
+  wait-for-uat:
+    name: "Wait for UAT Health"
+    if: >-
+      always() &&
+      (inputs.uat-base-url != '' || inputs.uat-healthcheck-url != '') &&
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs:
+      - approval-required
+      - approval-skipped
+      - deploy-uat
+    steps:
+      - name: Wait for Web Service to Become Healthy
+        env:
+          TARGET_URL: ${{ inputs.uat-healthcheck-url != '' && inputs.uat-healthcheck-url || inputs.uat-base-url }}
+          TIMEOUT_SECONDS: ${{ inputs.uat-timeout-seconds }}
+        run: |
+          if [ -z "${TARGET_URL}" ]; then
+            echo "No UAT healthcheck URL provided."
+            exit 0
+          fi
+
+          DEADLINE=$((SECONDS + TIMEOUT_SECONDS))
+          until [ "${SECONDS}" -ge "${DEADLINE}" ]; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${TARGET_URL}" || echo "000")
+            if [ "${STATUS}" = "200" ] || [ "${STATUS}" = "201" ] || [ "${STATUS}" = "204" ] || [ "${STATUS}" = "301" ] || [ "${STATUS}" = "302" ]; then
+              echo "UAT endpoint is ready: ${TARGET_URL} (${STATUS})"
+              exit 0
+            fi
+
+            echo "Waiting for ${TARGET_URL} (status ${STATUS})..."
+            sleep 10
+          done
+
+          echo "❌ Timed out waiting for UAT endpoint: ${TARGET_URL}"
+          exit 1
+
+  playwright-uat:
+    name: "Playwright UAT"
+    if: >-
+      always() &&
+      inputs.run-playwright &&
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled')
+    needs:
+      - approval-required
+      - approval-skipped
+      - deploy-uat
+      - wait-for-uat
+    uses: ./.github/workflows/playwright-e2e.yml
+    with:
+      working-directory: ${{ inputs.service-path }}
+      system-name: ${{ inputs.service-name }}
+      node-version: ${{ inputs.node-version }}
+      package-manager: ${{ inputs.package-manager }}
+      install-command: ${{ inputs.install-command }}
+      test-command: ${{ inputs.playwright-command }}
+      e2e-tests-directory: ${{ inputs.playwright-tests-directory }}
+      e2e-base-url: ${{ inputs.uat-base-url }}
+      browser-list: ${{ inputs.playwright-browsers }}
+      run-only-on-branch: "*"
+    secrets: inherit
+
+  k6-uat:
+    name: "k6 UAT"
+    if: >-
+      always() &&
+      inputs.run-k6 &&
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs:
+      - approval-required
+      - approval-skipped
+      - deploy-uat
+      - wait-for-uat
+    defaults:
+      run:
+        working-directory: ./${{ inputs.service-path }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Setup k6
+        uses: grafana/setup-k6-action@v1
+
+      - name: Run k6 Checks
+        env:
+          BASE_URL: ${{ inputs.uat-base-url }}
+          K6_BASE_URL: ${{ inputs.uat-base-url }}
+          CUSTOM_K6_COMMAND: ${{ inputs.k6-command }}
+          K6_SCRIPT_PATH: ${{ inputs.k6-script-path }}
+        run: |
+          set -euo pipefail
+
+          : > k6-output.log
+
+          if [ -n "${CUSTOM_K6_COMMAND}" ]; then
+            bash -lc "${CUSTOM_K6_COMMAND}" 2>&1 | tee -a k6-output.log
+            exit 0
+          fi
+
+          if [ -f "${K6_SCRIPT_PATH}" ]; then
+            k6 run "${K6_SCRIPT_PATH}" 2>&1 | tee -a k6-output.log
+            exit 0
+          fi
+
+          if [ ! -d "${K6_SCRIPT_PATH}" ]; then
+            echo "❌ k6 script path not found: ${K6_SCRIPT_PATH}" | tee -a k6-output.log
+            exit 1
+          fi
+
+          FOUND=false
+          while IFS= read -r script; do
+            [ -z "${script}" ] && continue
+            FOUND=true
+            echo "Running ${script}" | tee -a k6-output.log
+            k6 run "${script}" 2>&1 | tee -a k6-output.log
+          done < <(find "${K6_SCRIPT_PATH}" -type f \( -name "*.js" -o -name "*.ts" \) | sort)
+
+          if [ "${FOUND}" != "true" ]; then
+            echo "❌ No k6 scripts found under ${K6_SCRIPT_PATH}" | tee -a k6-output.log
+            exit 1
+          fi
+
+      - name: Upload k6 Report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.service-name }}-k6-uat
+          path: |
+            ${{ inputs.service-path }}/k6-output.log
+            ${{ inputs.service-path }}/${{ inputs.k6-script-path }}
+          retention-days: 14
+          if-no-files-found: ignore

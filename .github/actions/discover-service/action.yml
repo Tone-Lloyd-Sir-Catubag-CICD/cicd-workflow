@@ -1,0 +1,105 @@
+name: "Discover Service Configuration"
+description: "Detect a matching service path and infer safe workflow defaults for a supported stack."
+
+inputs:
+  stack:
+    description: "Supported stack name (nodejs|nestjs|react|nextjs|react-native|expo)"
+    required: true
+  service-path:
+    description: "Optional explicit service directory override"
+    required: false
+    default: ""
+  service-name:
+    description: "Optional explicit service display name override"
+    required: false
+    default: ""
+  repository-root:
+    description: "Repository root to scan"
+    required: false
+    default: "."
+
+outputs:
+  should-run:
+    description: "Whether the workflow should continue for the selected service"
+    value: ${{ steps.discover.outputs.should-run }}
+  reason:
+    description: "How the service was selected"
+    value: ${{ steps.discover.outputs.reason }}
+  service-path:
+    description: "Detected service directory"
+    value: ${{ steps.discover.outputs.service-path }}
+  service-name:
+    description: "Detected or overridden service name"
+    value: ${{ steps.discover.outputs.service-name }}
+  package-manager:
+    description: "Detected package manager"
+    value: ${{ steps.discover.outputs.package-manager }}
+  install-command:
+    description: "Install command for the detected package manager"
+    value: ${{ steps.discover.outputs.install-command }}
+  lint-command:
+    description: "Detected lint command"
+    value: ${{ steps.discover.outputs.lint-command }}
+  format-command:
+    description: "Detected format validation command"
+    value: ${{ steps.discover.outputs.format-command }}
+  typecheck-command:
+    description: "Detected type-check command"
+    value: ${{ steps.discover.outputs.typecheck-command }}
+  unit-test-command:
+    description: "Detected unit test command"
+    value: ${{ steps.discover.outputs.unit-test-command }}
+  integration-test-command:
+    description: "Detected integration test command"
+    value: ${{ steps.discover.outputs.integration-test-command }}
+  component-test-command:
+    description: "Detected component test command"
+    value: ${{ steps.discover.outputs.component-test-command }}
+  contract-test-command:
+    description: "Detected contract test command"
+    value: ${{ steps.discover.outputs.contract-test-command }}
+  e2e-test-command:
+    description: "Detected end-to-end test command"
+    value: ${{ steps.discover.outputs.e2e-test-command }}
+  build-command:
+    description: "Detected build command"
+    value: ${{ steps.discover.outputs.build-command }}
+  build-output-path:
+    description: "Detected build output path"
+    value: ${{ steps.discover.outputs.build-output-path }}
+  coverage-summary-path:
+    description: "Detected coverage summary path"
+    value: ${{ steps.discover.outputs.coverage-summary-path }}
+  run-playwright:
+    description: "Whether Playwright should run"
+    value: ${{ steps.discover.outputs.run-playwright }}
+  playwright-command:
+    description: "Detected Playwright command"
+    value: ${{ steps.discover.outputs.playwright-command }}
+  playwright-tests-directory:
+    description: "Detected Playwright tests directory"
+    value: ${{ steps.discover.outputs.playwright-tests-directory }}
+  run-k6:
+    description: "Whether k6 should run"
+    value: ${{ steps.discover.outputs.run-k6 }}
+  k6-script-path:
+    description: "Detected k6 script path"
+    value: ${{ steps.discover.outputs.k6-script-path }}
+  candidate-paths:
+    description: "JSON array of candidate service directories"
+    value: ${{ steps.discover.outputs.candidate-paths }}
+  changed-files:
+    description: "JSON array of changed files used for detection"
+    value: ${{ steps.discover.outputs.changed-files }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: discover
+      shell: bash
+      working-directory: ${{ inputs.repository-root }}
+      env:
+        STACK: ${{ inputs.stack }}
+        INPUT_SERVICE_PATH: ${{ inputs.service-path }}
+        INPUT_SERVICE_NAME: ${{ inputs.service-name }}
+      run: node "${{ github.action_path }}/discover-service.mjs"

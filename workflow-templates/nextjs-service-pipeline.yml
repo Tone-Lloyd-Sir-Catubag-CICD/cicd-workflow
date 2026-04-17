@@ -1,0 +1,112 @@
+# Copy into a consuming repository via GitHub workflow templates.
+# After onboarding, pin ImplementSprint/central-workflow refs to a release tag.
+name: "Next.js Service Pipeline"
+
+on:
+  push:
+    branches: [test, uat, main]
+  pull_request:
+    branches: [test, uat, main]
+  workflow_dispatch:
+    inputs:
+      service_path:
+        description: "Optional service directory override"
+        required: false
+        type: string
+        default: ""
+      service_name:
+        description: "Optional service display name override"
+        required: false
+        type: string
+        default: ""
+      node_version:
+        description: "Node.js version"
+        required: false
+        type: string
+        default: "24"
+      coverage_threshold:
+        description: "Minimum line coverage percentage"
+        required: false
+        type: number
+        default: 80
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    name: "Discover Next.js Service"
+    runs-on: ubuntu-latest
+    outputs:
+      should-run: ${{ steps.discover.outputs.should-run }}
+      service-path: ${{ steps.discover.outputs.service-path }}
+      service-name: ${{ steps.discover.outputs.service-name }}
+      package-manager: ${{ steps.discover.outputs.package-manager }}
+      install-command: ${{ steps.discover.outputs.install-command }}
+      lint-command: ${{ steps.discover.outputs.lint-command }}
+      format-command: ${{ steps.discover.outputs.format-command }}
+      typecheck-command: ${{ steps.discover.outputs.typecheck-command }}
+      unit-test-command: ${{ steps.discover.outputs.unit-test-command }}
+      component-test-command: ${{ steps.discover.outputs.component-test-command }}
+      build-command: ${{ steps.discover.outputs.build-command }}
+      build-output-path: ${{ steps.discover.outputs.build-output-path }}
+      run-playwright: ${{ steps.discover.outputs.run-playwright }}
+      playwright-command: ${{ steps.discover.outputs.playwright-command }}
+      playwright-tests-directory: ${{ steps.discover.outputs.playwright-tests-directory }}
+      run-k6: ${{ steps.discover.outputs.run-k6 }}
+      k6-script-path: ${{ steps.discover.outputs.k6-script-path }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.node_version || '24' }}
+
+      - name: Discover Service Configuration
+        id: discover
+        uses: ImplementSprint/central-workflow/.github/actions/discover-service@main
+        with:
+          stack: nextjs
+          service-path: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.service_path || '' }}
+          service-name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.service_name || '' }}
+
+  pipeline:
+    name: "Run Next.js Pipeline"
+    needs: [discover]
+    if: ${{ needs.discover.outputs.should-run == 'true' }}
+    uses: ImplementSprint/central-workflow/.github/workflows/service-nextjs.yml@main
+    with:
+      service-name: ${{ needs.discover.outputs.service-name }}
+      service-path: ${{ needs.discover.outputs.service-path }}
+      node-version: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.node_version || '24' }}
+      package-manager: ${{ needs.discover.outputs.package-manager }}
+      install-command: ${{ needs.discover.outputs.install-command }}
+      lint-command: ${{ needs.discover.outputs.lint-command }}
+      format-command: ${{ needs.discover.outputs.format-command }}
+      typecheck-command: ${{ needs.discover.outputs.typecheck-command }}
+      unit-test-command: ${{ needs.discover.outputs.unit-test-command }}
+      component-test-command: ${{ needs.discover.outputs.component-test-command }}
+      build-command: ${{ needs.discover.outputs.build-command }}
+      build-output-path: ${{ needs.discover.outputs.build-output-path }}
+      coverage-threshold: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.coverage_threshold || 80 }}
+      enable-dependency-review: ${{ github.event_name == 'pull_request' }}
+      uat-deploy-command: ${{ vars.UAT_DEPLOY_COMMAND || '' }}
+      uat-base-url: ${{ vars.UAT_BASE_URL || '' }}
+      uat-healthcheck-url: ${{ vars.UAT_HEALTHCHECK_URL || '' }}
+      require-uat-approval: ${{ vars.REQUIRE_UAT_APPROVAL != 'false' }}
+      run-playwright: ${{ needs.discover.outputs.run-playwright == 'true' }}
+      playwright-command: ${{ needs.discover.outputs.playwright-command }}
+      playwright-tests-directory: ${{ needs.discover.outputs.playwright-tests-directory }}
+      run-k6: ${{ needs.discover.outputs.run-k6 == 'true' }}
+      k6-script-path: ${{ needs.discover.outputs.k6-script-path }}
+      require-production-approval: ${{ vars.REQUIRE_PRODUCTION_APPROVAL == 'true' }}
+      production-staging-url: ${{ vars.PRODUCTION_STAGING_URL || vars.UAT_BASE_URL || '' }}
+    secrets: inherit

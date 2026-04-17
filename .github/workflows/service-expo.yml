@@ -1,0 +1,209 @@
+name: "Service: Expo"
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        required: true
+        type: string
+        description: "Display name for the Expo service"
+      service-path:
+        required: false
+        type: string
+        default: "."
+        description: "Directory that contains the service"
+      node-version:
+        required: false
+        type: number
+        default: 24
+        description: "Node.js version"
+      java-version:
+        required: false
+        type: string
+        default: "17"
+        description: "JDK version for Android builds"
+      coverage-threshold:
+        required: false
+        type: number
+        default: 80
+        description: "Minimum line coverage percentage"
+      enable-lint:
+        required: false
+        type: boolean
+        default: true
+        description: "Run lint checks"
+      enable-security-scan:
+        required: false
+        type: boolean
+        default: true
+        description: "Run security scanning"
+      enable-android-build:
+        required: false
+        type: boolean
+        default: true
+        description: "Run Android build"
+      enable-ios-build:
+        required: false
+        type: boolean
+        default: true
+        description: "Run iOS simulator build"
+      enable-maestro:
+        required: false
+        type: boolean
+        default: true
+        description: "Run Maestro Android E2E"
+      enable-maestro-ios:
+        required: false
+        type: boolean
+        default: true
+        description: "Run Maestro iOS E2E"
+      android-build-command:
+        required: false
+        type: string
+        default: "cd android && ./gradlew :app:assembleDebug -PbundleInDebug=true"
+        description: "Android build command"
+      maestro-test-command:
+        required: false
+        type: string
+        default: "maestro test .maestro"
+        description: "Maestro Android test command"
+      ios-build-command:
+        required: false
+        type: string
+        default: ""
+        description: "Optional iOS build command"
+      maestro-ios-test-command:
+        required: false
+        type: string
+        default: "maestro test .maestro"
+        description: "Maestro iOS test command"
+      ios-runner:
+        required: false
+        type: string
+        default: "macos-15"
+        description: "GitHub macOS runner label for iOS jobs"
+      ios-xcode-version:
+        required: false
+        type: string
+        default: "16.2"
+        description: "Preferred Xcode version"
+      ios-xcode-fallbacks:
+        required: false
+        type: string
+        default: "16.3,16.4,26.2"
+        description: "Fallback Xcode versions"
+      eas-build-command:
+        required: false
+        type: string
+        default: ""
+        description: "Optional EAS Build command for cloud/mobile distribution workflows"
+      require-production-approval:
+        required: false
+        type: boolean
+        default: false
+        description: "Require production approval gate"
+      production-staging-url:
+        required: false
+        type: string
+        default: ""
+        description: "Optional URL re-used by the production gate"
+
+permissions:
+  contents: read
+
+jobs:
+  mobile:
+    name: "Expo Mobile Quality"
+    uses: ./.github/workflows/mobile-workflow.yml
+    with:
+      system-dir: ${{ inputs.service-path }}
+      system-name: ${{ inputs.service-name }}
+      node-version: ${{ inputs.node-version }}
+      java-version: ${{ inputs.java-version }}
+      coverage-threshold: ${{ inputs.coverage-threshold }}
+      enable-lint: ${{ inputs.enable-lint }}
+      enable-security-scan: ${{ inputs.enable-security-scan }}
+      enable-android-build: ${{ inputs.enable-android-build }}
+      enable-ios-build: ${{ inputs.enable-ios-build }}
+      enable-maestro: ${{ inputs.enable-maestro }}
+      enable-maestro-ios: ${{ inputs.enable-maestro-ios }}
+      android-build-command: ${{ inputs.android-build-command }}
+      maestro-test-command: ${{ inputs.maestro-test-command }}
+      ios-build-command: ${{ inputs.ios-build-command }}
+      maestro-ios-test-command: ${{ inputs.maestro-ios-test-command }}
+      ios-runner: ${{ inputs.ios-runner }}
+      ios-xcode-version: ${{ inputs.ios-xcode-version }}
+      ios-xcode-fallbacks: ${{ inputs.ios-xcode-fallbacks }}
+    secrets: inherit
+
+  eas-build:
+    name: "Expo EAS Build"
+    if: ${{ inputs.eas-build-command != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [mobile]
+    defaults:
+      run:
+        working-directory: ./${{ inputs.service-path }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Detect Package Manager
+        id: package-manager
+        run: |
+          if [ -f "pnpm-lock.yaml" ]; then
+            PM="pnpm"
+          elif [ -f "yarn.lock" ]; then
+            PM="yarn"
+          else
+            PM="npm"
+          fi
+          echo "manager=${PM}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ steps.package-manager.outputs.manager }}
+          cache-dependency-path: |
+            ${{ inputs.service-path }}/package-lock.json
+            ${{ inputs.service-path }}/npm-shrinkwrap.json
+            ${{ inputs.service-path }}/yarn.lock
+            ${{ inputs.service-path }}/pnpm-lock.yaml
+
+      - name: Install Dependencies
+        env:
+          PACKAGE_MANAGER: ${{ steps.package-manager.outputs.manager }}
+        run: |
+          if [ "${PACKAGE_MANAGER}" = "pnpm" ]; then
+            corepack enable
+            pnpm install --frozen-lockfile
+          elif [ "${PACKAGE_MANAGER}" = "yarn" ]; then
+            corepack enable
+            yarn install --immutable || yarn install --frozen-lockfile
+          else
+            npm ci
+          fi
+
+      - name: Run EAS Build Command
+        run: |
+          echo "Running EAS Build for ${{ inputs.service-name }}..."
+          bash -lc "${{ inputs.eas-build-command }}"
+
+  production-gate:
+    name: "Expo Production Gate"
+    if: >-
+      always() &&
+      inputs.require-production-approval &&
+      needs.mobile.result == 'success' &&
+      (needs.eas-build.result == 'success' || needs.eas-build.result == 'skipped')
+    needs:
+      - mobile
+      - eas-build
+    uses: ./.github/workflows/production-gate.yml
+    with:
+      system-dir: ${{ inputs.service-path }}
+      app-type: mobile
+      staging-url: ${{ inputs.production-staging-url }}
+      require-approval: true

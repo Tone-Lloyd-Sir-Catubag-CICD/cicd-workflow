@@ -1,0 +1,14 @@
+{
+  "name": "NestJS Service Pipeline",
+  "description": "Create a NestJS API pipeline with folder discovery, script inference, UAT wiring, and production gating.",
+  "iconName": "octicon container",
+  "categories": [
+    "JavaScript",
+    "TypeScript",
+    "Node.js"
+  ],
+  "filePatterns": [
+    "package.json$",
+    "^nest-cli\\.json$"
+  ]
+}

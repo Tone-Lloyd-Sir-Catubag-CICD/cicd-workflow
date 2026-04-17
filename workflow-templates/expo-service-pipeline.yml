@@ -1,0 +1,80 @@
+# Copy into a consuming repository via GitHub workflow templates.
+# After onboarding, pin ImplementSprint/central-workflow refs to a release tag.
+name: "Expo Service Pipeline"
+
+on:
+  push:
+    branches: [test, uat, main]
+  pull_request:
+    branches: [test, uat, main]
+  workflow_dispatch:
+    inputs:
+      service_path:
+        description: "Optional service directory override"
+        required: false
+        type: string
+        default: ""
+      service_name:
+        description: "Optional service display name override"
+        required: false
+        type: string
+        default: ""
+      node_version:
+        description: "Node.js version"
+        required: false
+        type: string
+        default: "24"
+      coverage_threshold:
+        description: "Minimum line coverage percentage"
+        required: false
+        type: number
+        default: 80
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    name: "Discover Expo Service"
+    runs-on: ubuntu-latest
+    outputs:
+      should-run: ${{ steps.discover.outputs.should-run }}
+      service-path: ${{ steps.discover.outputs.service-path }}
+      service-name: ${{ steps.discover.outputs.service-name }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.node_version || '24' }}
+
+      - name: Discover Service Configuration
+        id: discover
+        uses: ImplementSprint/central-workflow/.github/actions/discover-service@main
+        with:
+          stack: expo
+          service-path: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.service_path || '' }}
+          service-name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.service_name || '' }}
+
+  pipeline:
+    name: "Run Expo Pipeline"
+    needs: [discover]
+    if: ${{ needs.discover.outputs.should-run == 'true' }}
+    uses: ImplementSprint/central-workflow/.github/workflows/service-expo.yml@main
+    with:
+      service-name: ${{ needs.discover.outputs.service-name }}
+      service-path: ${{ needs.discover.outputs.service-path }}
+      node-version: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.node_version || 24 }}
+      coverage-threshold: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.coverage_threshold || 80 }}
+      eas-build-command: ${{ vars.EAS_BUILD_COMMAND || '' }}
+      require-production-approval: ${{ vars.REQUIRE_PRODUCTION_APPROVAL == 'true' }}
+      production-staging-url: ${{ vars.PRODUCTION_STAGING_URL || '' }}
+    secrets: inherit

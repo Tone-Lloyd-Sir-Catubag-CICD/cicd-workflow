@@ -4,7 +4,9 @@ on:
   pull_request:
     paths:
       - ".github/workflows/**"
+      - ".github/actions/**"
       - "templates/**"
+      - "workflow-templates/**"
       - "MOBILE_PIPELINE_PRESETS_AND_PROMPT.md"
       - "USER_STORIES_STATUS.md"
   workflow_dispatch:
@@ -292,3 +294,278 @@ jobs:
           fi
 
           echo "✅ Backend config matrix simulation passed."
+
+  validate-stack-workflow-templates:
+    name: "Validate Stack Workflow Templates"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Assert stack workflow template contract
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          assert_contains() {
+            local file="$1"
+            local expected="$2"
+            if ! grep -Fq "$expected" "$file"; then
+              echo "❌ Expected '$expected' in $file"
+              exit 1
+            fi
+          }
+
+          for file in \
+            workflow-templates/nodejs-service-pipeline.yml \
+            workflow-templates/nest-service-pipeline.yml \
+            workflow-templates/react-service-pipeline.yml \
+            workflow-templates/nextjs-service-pipeline.yml \
+            workflow-templates/react-native-service-pipeline.yml \
+            workflow-templates/expo-service-pipeline.yml
+          do
+            test -f "$file" || { echo "❌ Missing workflow template: $file"; exit 1; }
+            assert_contains "$file" "ImplementSprint/central-workflow/.github/actions/discover-service@main"
+            assert_contains "$file" "fetch-depth: 0"
+          done
+
+          assert_contains workflow-templates/nodejs-service-pipeline.yml "ImplementSprint/central-workflow/.github/workflows/service-node.yml@main"
+          assert_contains workflow-templates/nest-service-pipeline.yml "ImplementSprint/central-workflow/.github/workflows/service-nestjs.yml@main"
+          assert_contains workflow-templates/react-service-pipeline.yml "ImplementSprint/central-workflow/.github/workflows/service-react.yml@main"
+          assert_contains workflow-templates/nextjs-service-pipeline.yml "ImplementSprint/central-workflow/.github/workflows/service-nextjs.yml@main"
+          assert_contains workflow-templates/react-native-service-pipeline.yml "ImplementSprint/central-workflow/.github/workflows/service-react-native.yml@main"
+          assert_contains workflow-templates/expo-service-pipeline.yml "ImplementSprint/central-workflow/.github/workflows/service-expo.yml@main"
+
+          test -f workflow-templates/README.md || { echo "❌ Missing workflow-templates/README.md"; exit 1; }
+          test -f .github/actions/discover-service/action.yml || { echo "❌ Missing discovery action metadata"; exit 1; }
+          test -f .github/actions/discover-service/discover-service.mjs || { echo "❌ Missing discovery action implementation"; exit 1; }
+
+          echo "✅ Stack workflow templates validated."
+
+  simulate-discovery-action:
+    name: "Simulate Discovery Action"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Build synthetic repositories and validate detection
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="$(mktemp -d)"
+          SCRIPT="$GITHUB_WORKSPACE/.github/actions/discover-service/discover-service.mjs"
+
+          run_discovery() {
+            local repo="$1"
+            local stack="$2"
+            local changed="$3"
+            (
+              cd "$repo"
+              CHANGED_FILES="$changed" \
+              GITHUB_EVENT_NAME="push" \
+              node "$SCRIPT" --stack "$stack"
+            )
+          }
+
+          mkdir -p "$ROOT/node-service/src"
+          cat <<'EOF' > "$ROOT/node-service/package.json"
+          {
+            "name": "node-service",
+            "scripts": {
+              "lint": "eslint .",
+              "build": "tsc -p tsconfig.json",
+              "test:coverage": "jest --coverage",
+              "test:e2e": "jest --config test/jest-e2e.json"
+            },
+            "dependencies": {
+              "express": "^4.21.0"
+            }
+          }
+          EOF
+          cat <<'EOF' > "$ROOT/node-service/tsconfig.json"
+          {
+            "compilerOptions": {
+              "strict": true
+            }
+          }
+          EOF
+
+          mkdir -p "$ROOT/nest-service/src"
+          cat <<'EOF' > "$ROOT/nest-service/package.json"
+          {
+            "name": "nest-service",
+            "scripts": {
+              "lint": "eslint .",
+              "build": "nest build",
+              "test:coverage": "jest --coverage",
+              "test:e2e": "jest --config test/jest-e2e.json"
+            },
+            "dependencies": {
+              "@nestjs/core": "^11.0.0",
+              "@nestjs/common": "^11.0.0"
+            }
+          }
+          EOF
+          cat <<'EOF' > "$ROOT/nest-service/nest-cli.json"
+          {
+            "collection": "@nestjs/schematics"
+          }
+          EOF
+          cat <<'EOF' > "$ROOT/nest-service/tsconfig.json"
+          {
+            "compilerOptions": {
+              "strict": true
+            }
+          }
+          EOF
+
+          mkdir -p "$ROOT/web-monorepo/apps/portal/src" "$ROOT/web-monorepo/apps/portal/tests/e2e" "$ROOT/web-monorepo/apps/portal/tests/performance"
+          mkdir -p "$ROOT/web-monorepo/apps/landing/src"
+          cat <<'EOF' > "$ROOT/web-monorepo/apps/portal/package.json"
+          {
+            "name": "portal",
+            "scripts": {
+              "lint": "eslint .",
+              "build": "vite build",
+              "test": "vitest run",
+              "test:coverage": "vitest run --coverage"
+            },
+            "dependencies": {
+              "react": "^19.0.0",
+              "vite": "^6.0.0"
+            },
+            "devDependencies": {
+              "@playwright/test": "^1.54.0"
+            }
+          }
+          EOF
+          cat <<'EOF' > "$ROOT/web-monorepo/apps/portal/tsconfig.json"
+          {
+            "compilerOptions": {
+              "strict": true
+            }
+          }
+          EOF
+          touch "$ROOT/web-monorepo/apps/portal/tests/e2e/smoke.spec.ts"
+          touch "$ROOT/web-monorepo/apps/portal/tests/performance/smoke.js"
+          cat <<'EOF' > "$ROOT/web-monorepo/apps/landing/package.json"
+          {
+            "name": "landing",
+            "scripts": {
+              "lint": "eslint .",
+              "build": "vite build",
+              "test": "vitest run"
+            },
+            "dependencies": {
+              "react": "^19.0.0",
+              "vite": "^6.0.0"
+            }
+          }
+          EOF
+          cat <<'EOF' > "$ROOT/web-monorepo/apps/landing/tsconfig.json"
+          {
+            "compilerOptions": {
+              "strict": true
+            }
+          }
+          EOF
+
+          mkdir -p "$ROOT/next-app/src" "$ROOT/next-app/tests/e2e"
+          cat <<'EOF' > "$ROOT/next-app/package.json"
+          {
+            "name": "next-app",
+            "scripts": {
+              "lint": "next lint",
+              "build": "next build",
+              "test": "vitest run"
+            },
+            "dependencies": {
+              "next": "^16.0.0",
+              "react": "^19.0.0"
+            },
+            "devDependencies": {
+              "@playwright/test": "^1.54.0"
+            }
+          }
+          EOF
+          cat <<'EOF' > "$ROOT/next-app/next.config.js"
+          module.exports = {};
+          EOF
+          cat <<'EOF' > "$ROOT/next-app/tsconfig.json"
+          {
+            "compilerOptions": {
+              "strict": true
+            }
+          }
+          EOF
+          touch "$ROOT/next-app/tests/e2e/home.spec.ts"
+
+          mkdir -p "$ROOT/react-native-app/android" "$ROOT/react-native-app/ios"
+          cat <<'EOF' > "$ROOT/react-native-app/package.json"
+          {
+            "name": "react-native-app",
+            "dependencies": {
+              "react-native": "^0.82.0",
+              "react": "^19.0.0",
+              "typescript": "^5.8.0"
+            }
+          }
+          EOF
+          cat <<'EOF' > "$ROOT/react-native-app/tsconfig.json"
+          {
+            "compilerOptions": {
+              "strict": true
+            }
+          }
+          EOF
+
+          mkdir -p "$ROOT/expo-app/app"
+          cat <<'EOF' > "$ROOT/expo-app/package.json"
+          {
+            "name": "expo-app",
+            "dependencies": {
+              "expo": "^54.0.0",
+              "react-native": "^0.82.0",
+              "react": "^19.0.0",
+              "typescript": "^5.8.0"
+            }
+          }
+          EOF
+          cat <<'EOF' > "$ROOT/expo-app/app.json"
+          {
+            "expo": {
+              "name": "Expo App"
+            }
+          }
+          EOF
+          cat <<'EOF' > "$ROOT/expo-app/tsconfig.json"
+          {
+            "compilerOptions": {
+              "strict": true
+            }
+          }
+          EOF
+
+          NODE_JSON="$(run_discovery "$ROOT/node-service" "nodejs" "src/index.ts")"
+          echo "$NODE_JSON" | jq -e '."service-path" == "." and ."build-output-path" == "dist" and ."unit-test-command" == "npm run test:coverage"' >/dev/null
+
+          NEST_JSON="$(run_discovery "$ROOT/nest-service" "nestjs" "src/app.controller.ts")"
+          echo "$NEST_JSON" | jq -e '."service-path" == "." and ."e2e-test-command" == "npm run test:e2e"' >/dev/null
+
+          REACT_JSON="$(run_discovery "$ROOT/web-monorepo" "react" $'"'"'apps/portal/src/App.tsx\napps/portal/tests/e2e/smoke.spec.ts'"'"')"
+          echo "$REACT_JSON" | jq -e '."service-path" == "apps/portal" and ."run-playwright" == "true" and ."run-k6" == "true" and ."build-output-path" == "dist"' >/dev/null
+
+          NEXT_JSON="$(run_discovery "$ROOT/next-app" "nextjs" "src/page.tsx")"
+          echo "$NEXT_JSON" | jq -e '."service-path" == "." and ."run-playwright" == "true" and ."build-output-path" == ".next"' >/dev/null
+
+          RN_JSON="$(run_discovery "$ROOT/react-native-app" "react-native" "ios/AppDelegate.mm")"
+          echo "$RN_JSON" | jq -e '."service-path" == "." and ."service-name" == "react-native-app"' >/dev/null
+
+          EXPO_JSON="$(run_discovery "$ROOT/expo-app" "expo" "app/index.tsx")"
+          echo "$EXPO_JSON" | jq -e '."service-path" == "." and ."service-name" == "expo-app"' >/dev/null
+
+          echo "✅ Discovery action simulation passed."

@@ -1,0 +1,15 @@
+{
+  "name": "React Native Service Pipeline",
+  "description": "Create a React Native pipeline with folder discovery, Android and iOS build defaults, and Maestro E2E support.",
+  "iconName": "octicon device-mobile",
+  "categories": [
+    "JavaScript",
+    "TypeScript",
+    "React Native"
+  ],
+  "filePatterns": [
+    "package.json$",
+    "^react-native\\.config\\.js$",
+    "^metro\\.config\\.js$"
+  ]
+}

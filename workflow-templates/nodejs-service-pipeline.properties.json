@@ -1,0 +1,13 @@
+{
+  "name": "Node.js Service Pipeline",
+  "description": "Create a reusable Node.js microservice pipeline with folder discovery and safe command inference.",
+  "iconName": "octicon package",
+  "categories": [
+    "JavaScript",
+    "TypeScript",
+    "Node.js"
+  ],
+  "filePatterns": [
+    "package.json$"
+  ]
+}

@@ -1,0 +1,902 @@
+name: "Reusable: JavaScript Quality Core"
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        required: true
+        type: string
+        description: "Display name for the service"
+      service-path:
+        required: false
+        type: string
+        default: "."
+        description: "Directory that contains the service"
+      stack-name:
+        required: false
+        type: string
+        default: "javascript"
+        description: "Stack label used in artifacts and cache keys"
+      node-version:
+        required: false
+        type: string
+        default: "24"
+        description: "Node.js version"
+      package-manager:
+        required: false
+        type: string
+        default: "auto"
+        description: "Package manager override (auto|npm|yarn|pnpm)"
+      install-command:
+        required: false
+        type: string
+        default: ""
+        description: "Optional install command override"
+      lint-command:
+        required: false
+        type: string
+        default: ""
+        description: "Lint command"
+      format-command:
+        required: false
+        type: string
+        default: ""
+        description: "Format validation command"
+      typecheck-command:
+        required: false
+        type: string
+        default: ""
+        description: "Type-check command"
+      unit-test-command:
+        required: false
+        type: string
+        default: ""
+        description: "Unit test command"
+      integration-test-command:
+        required: false
+        type: string
+        default: ""
+        description: "Integration test command"
+      component-test-command:
+        required: false
+        type: string
+        default: ""
+        description: "Component test command"
+      contract-test-command:
+        required: false
+        type: string
+        default: ""
+        description: "Contract test command"
+      e2e-test-command:
+        required: false
+        type: string
+        default: ""
+        description: "End-to-end test command"
+      build-command:
+        required: false
+        type: string
+        default: ""
+        description: "Build command"
+      build-output-path:
+        required: false
+        type: string
+        default: ""
+        description: "Build output folder or file"
+      build-cache-path:
+        required: false
+        type: string
+        default: ""
+        description: "Optional build cache path (for example .next/cache)"
+      coverage-summary-path:
+        required: false
+        type: string
+        default: "coverage/coverage-summary.json"
+        description: "Coverage summary JSON path"
+      coverage-threshold:
+        required: false
+        type: number
+        default: 80
+        description: "Minimum line coverage percentage"
+      enable-dependency-review:
+        required: false
+        type: boolean
+        default: false
+        description: "Run GitHub dependency review on pull requests"
+      enable-audit:
+        required: false
+        type: boolean
+        default: true
+        description: "Run dependency audit"
+      custom-audit-command:
+        required: false
+        type: string
+        default: ""
+        description: "Optional audit command override"
+      enable-license-check:
+        required: false
+        type: boolean
+        default: true
+        description: "Run license compliance check"
+      allowed-licenses:
+        required: false
+        type: string
+        default: "MIT;ISC;BSD-2-Clause;BSD-3-Clause;Apache-2.0;Apache 2.0;0BSD;CC0-1.0;CC-BY-3.0;CC-BY-4.0;MPL-2.0;Unlicense;Python-2.0;BlueOak-1.0.0;LGPL-3.0-or-later;(Apache-2.0 AND LGPL-3.0-or-later);(BSD-2-Clause OR MIT OR Apache-2.0);(BSD-3-Clause OR GPL-2.0);(MIT OR CC0-1.0)"
+        description: "Semicolon-delimited allow list for license-checker"
+      enable-attestation:
+        required: false
+        type: boolean
+        default: false
+        description: "Generate build provenance attestations for the build output"
+    outputs:
+      build-artifact-name:
+        description: "Uploaded build artifact name"
+        value: ${{ jobs.build.outputs.artifact-name }}
+      build-result:
+        description: "Build job result"
+        value: ${{ jobs.build.outputs.build-result }}
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    name: "Dependency Review"
+    if: ${{ github.event_name == 'pull_request' && inputs.enable-dependency-review }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Review Dependency Changes
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          vulnerability-check: true
+          license-check: ${{ inputs.allowed-licenses != '' }}
+          allow-licenses: ${{ inputs.allowed-licenses }}
+
+  static-analysis:
+    name: "Static Analysis"
+    if: ${{ inputs.lint-command != '' || inputs.format-command != '' || inputs.typecheck-command != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ./${{ inputs.service-path }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Detect Package Manager
+        id: package-manager
+        run: |
+          INPUT_PM="${{ inputs.package-manager }}"
+          if [ -n "${INPUT_PM}" ] && [ "${INPUT_PM}" != "auto" ]; then
+            PM="${INPUT_PM}"
+          elif [ -f "pnpm-lock.yaml" ]; then
+            PM="pnpm"
+          elif [ -f "yarn.lock" ]; then
+            PM="yarn"
+          elif [ -f "package-lock.json" ] || [ -f "npm-shrinkwrap.json" ] || [ -f "package.json" ]; then
+            PM="npm"
+          else
+            echo "❌ package.json is required in ${{ inputs.service-path }}."
+            exit 1
+          fi
+
+          case "${PM}" in
+            npm|yarn|pnpm) ;;
+            *)
+              echo "❌ Unsupported package manager: ${PM}"
+              exit 1
+              ;;
+          esac
+
+          echo "manager=${PM}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ steps.package-manager.outputs.manager }}
+          cache-dependency-path: |
+            ${{ inputs.service-path }}/package-lock.json
+            ${{ inputs.service-path }}/npm-shrinkwrap.json
+            ${{ inputs.service-path }}/yarn.lock
+            ${{ inputs.service-path }}/pnpm-lock.yaml
+
+      - name: Install Dependencies
+        env:
+          CUSTOM_INSTALL_COMMAND: ${{ inputs.install-command }}
+          PACKAGE_MANAGER: ${{ steps.package-manager.outputs.manager }}
+        run: |
+          if [ -n "${CUSTOM_INSTALL_COMMAND}" ]; then
+            bash -lc "${CUSTOM_INSTALL_COMMAND}"
+          elif [ "${PACKAGE_MANAGER}" = "pnpm" ]; then
+            corepack enable
+            pnpm install --frozen-lockfile
+          elif [ "${PACKAGE_MANAGER}" = "yarn" ]; then
+            corepack enable
+            yarn install --immutable || yarn install --frozen-lockfile
+          else
+            npm ci
+          fi
+
+      - name: Run Lint
+        if: ${{ inputs.lint-command != '' }}
+        run: |
+          echo "Running lint for ${{ inputs.service-name }}..."
+          bash -lc "${{ inputs.lint-command }}"
+
+      - name: Run Format Validation
+        if: ${{ inputs.format-command != '' }}
+        run: |
+          echo "Running format validation for ${{ inputs.service-name }}..."
+          bash -lc "${{ inputs.format-command }}"
+
+      - name: Run Type Check
+        if: ${{ inputs.typecheck-command != '' }}
+        run: |
+          echo "Running type check for ${{ inputs.service-name }}..."
+          bash -lc "${{ inputs.typecheck-command }}"
+
+  unit-tests:
+    name: "Unit Tests"
+    if: ${{ inputs.unit-test-command != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ./${{ inputs.service-path }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Detect Package Manager
+        id: package-manager
+        run: |
+          INPUT_PM="${{ inputs.package-manager }}"
+          if [ -n "${INPUT_PM}" ] && [ "${INPUT_PM}" != "auto" ]; then
+            PM="${INPUT_PM}"
+          elif [ -f "pnpm-lock.yaml" ]; then
+            PM="pnpm"
+          elif [ -f "yarn.lock" ]; then
+            PM="yarn"
+          elif [ -f "package-lock.json" ] || [ -f "npm-shrinkwrap.json" ] || [ -f "package.json" ]; then
+            PM="npm"
+          else
+            echo "❌ package.json is required in ${{ inputs.service-path }}."
+            exit 1
+          fi
+
+          case "${PM}" in
+            npm|yarn|pnpm) ;;
+            *)
+              echo "❌ Unsupported package manager: ${PM}"
+              exit 1
+              ;;
+          esac
+
+          echo "manager=${PM}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ steps.package-manager.outputs.manager }}
+          cache-dependency-path: |
+            ${{ inputs.service-path }}/package-lock.json
+            ${{ inputs.service-path }}/npm-shrinkwrap.json
+            ${{ inputs.service-path }}/yarn.lock
+            ${{ inputs.service-path }}/pnpm-lock.yaml
+
+      - name: Install Dependencies
+        env:
+          CUSTOM_INSTALL_COMMAND: ${{ inputs.install-command }}
+          PACKAGE_MANAGER: ${{ steps.package-manager.outputs.manager }}
+        run: |
+          if [ -n "${CUSTOM_INSTALL_COMMAND}" ]; then
+            bash -lc "${CUSTOM_INSTALL_COMMAND}"
+          elif [ "${PACKAGE_MANAGER}" = "pnpm" ]; then
+            corepack enable
+            pnpm install --frozen-lockfile
+          elif [ "${PACKAGE_MANAGER}" = "yarn" ]; then
+            corepack enable
+            yarn install --immutable || yarn install --frozen-lockfile
+          else
+            npm ci
+          fi
+
+      - name: Run Unit Tests
+        env:
+          CI: "true"
+        run: |
+          echo "Running unit tests for ${{ inputs.service-name }}..."
+          bash -lc "${{ inputs.unit-test-command }}"
+
+      - name: Enforce Coverage Threshold
+        env:
+          COVERAGE_SUMMARY_PATH: ${{ inputs.coverage-summary-path }}
+          COVERAGE_THRESHOLD: ${{ inputs.coverage-threshold }}
+        run: |
+          if [ ! -f "${COVERAGE_SUMMARY_PATH}" ]; then
+            echo "❌ Coverage summary not found: ${COVERAGE_SUMMARY_PATH}"
+            exit 1
+          fi
+
+          COVERAGE=$(node -e "const fs=require('fs'); const p=process.env.COVERAGE_SUMMARY_PATH; const data=JSON.parse(fs.readFileSync(p,'utf8')); const pct=data?.total?.lines?.pct; if(typeof pct !== 'number'){throw new Error('Missing total.lines.pct in coverage summary.');} console.log(pct);")
+          echo "Coverage: ${COVERAGE}%"
+
+          node -e "const coverage=Number(process.argv[1]); const threshold=Number(process.argv[2]); if (!Number.isFinite(coverage)) { process.exit(2); } if (coverage < threshold) { process.exit(1); }" "${COVERAGE}" "${COVERAGE_THRESHOLD}"
+
+      - name: Upload Coverage Artifact
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.service-name }}-${{ inputs.stack-name }}-coverage
+          path: ${{ inputs.service-path }}/coverage
+          retention-days: 14
+          if-no-files-found: ignore
+
+  integration-tests:
+    name: "Integration Tests"
+    if: ${{ inputs.integration-test-command != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ./${{ inputs.service-path }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Detect Package Manager
+        id: package-manager
+        run: |
+          INPUT_PM="${{ inputs.package-manager }}"
+          if [ -n "${INPUT_PM}" ] && [ "${INPUT_PM}" != "auto" ]; then
+            PM="${INPUT_PM}"
+          elif [ -f "pnpm-lock.yaml" ]; then
+            PM="pnpm"
+          elif [ -f "yarn.lock" ]; then
+            PM="yarn"
+          elif [ -f "package-lock.json" ] || [ -f "npm-shrinkwrap.json" ] || [ -f "package.json" ]; then
+            PM="npm"
+          else
+            echo "❌ package.json is required in ${{ inputs.service-path }}."
+            exit 1
+          fi
+
+          echo "manager=${PM}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ steps.package-manager.outputs.manager }}
+          cache-dependency-path: |
+            ${{ inputs.service-path }}/package-lock.json
+            ${{ inputs.service-path }}/npm-shrinkwrap.json
+            ${{ inputs.service-path }}/yarn.lock
+            ${{ inputs.service-path }}/pnpm-lock.yaml
+
+      - name: Install Dependencies
+        env:
+          CUSTOM_INSTALL_COMMAND: ${{ inputs.install-command }}
+          PACKAGE_MANAGER: ${{ steps.package-manager.outputs.manager }}
+        run: |
+          if [ -n "${CUSTOM_INSTALL_COMMAND}" ]; then
+            bash -lc "${CUSTOM_INSTALL_COMMAND}"
+          elif [ "${PACKAGE_MANAGER}" = "pnpm" ]; then
+            corepack enable
+            pnpm install --frozen-lockfile
+          elif [ "${PACKAGE_MANAGER}" = "yarn" ]; then
+            corepack enable
+            yarn install --immutable || yarn install --frozen-lockfile
+          else
+            npm ci
+          fi
+
+      - name: Run Integration Tests
+        env:
+          CI: "true"
+        run: |
+          echo "Running integration tests for ${{ inputs.service-name }}..."
+          bash -lc "${{ inputs.integration-test-command }}"
+
+  component-tests:
+    name: "Component Tests"
+    if: ${{ inputs.component-test-command != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ./${{ inputs.service-path }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Detect Package Manager
+        id: package-manager
+        run: |
+          INPUT_PM="${{ inputs.package-manager }}"
+          if [ -n "${INPUT_PM}" ] && [ "${INPUT_PM}" != "auto" ]; then
+            PM="${INPUT_PM}"
+          elif [ -f "pnpm-lock.yaml" ]; then
+            PM="pnpm"
+          elif [ -f "yarn.lock" ]; then
+            PM="yarn"
+          elif [ -f "package-lock.json" ] || [ -f "npm-shrinkwrap.json" ] || [ -f "package.json" ]; then
+            PM="npm"
+          else
+            echo "❌ package.json is required in ${{ inputs.service-path }}."
+            exit 1
+          fi
+
+          echo "manager=${PM}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ steps.package-manager.outputs.manager }}
+          cache-dependency-path: |
+            ${{ inputs.service-path }}/package-lock.json
+            ${{ inputs.service-path }}/npm-shrinkwrap.json
+            ${{ inputs.service-path }}/yarn.lock
+            ${{ inputs.service-path }}/pnpm-lock.yaml
+
+      - name: Install Dependencies
+        env:
+          CUSTOM_INSTALL_COMMAND: ${{ inputs.install-command }}
+          PACKAGE_MANAGER: ${{ steps.package-manager.outputs.manager }}
+        run: |
+          if [ -n "${CUSTOM_INSTALL_COMMAND}" ]; then
+            bash -lc "${CUSTOM_INSTALL_COMMAND}"
+          elif [ "${PACKAGE_MANAGER}" = "pnpm" ]; then
+            corepack enable
+            pnpm install --frozen-lockfile
+          elif [ "${PACKAGE_MANAGER}" = "yarn" ]; then
+            corepack enable
+            yarn install --immutable || yarn install --frozen-lockfile
+          else
+            npm ci
+          fi
+
+      - name: Run Component Tests
+        env:
+          CI: "true"
+        run: |
+          echo "Running component tests for ${{ inputs.service-name }}..."
+          bash -lc "${{ inputs.component-test-command }}"
+
+  contract-tests:
+    name: "Contract Tests"
+    if: ${{ inputs.contract-test-command != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ./${{ inputs.service-path }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Detect Package Manager
+        id: package-manager
+        run: |
+          INPUT_PM="${{ inputs.package-manager }}"
+          if [ -n "${INPUT_PM}" ] && [ "${INPUT_PM}" != "auto" ]; then
+            PM="${INPUT_PM}"
+          elif [ -f "pnpm-lock.yaml" ]; then
+            PM="pnpm"
+          elif [ -f "yarn.lock" ]; then
+            PM="yarn"
+          elif [ -f "package-lock.json" ] || [ -f "npm-shrinkwrap.json" ] || [ -f "package.json" ]; then
+            PM="npm"
+          else
+            echo "❌ package.json is required in ${{ inputs.service-path }}."
+            exit 1
+          fi
+
+          echo "manager=${PM}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ steps.package-manager.outputs.manager }}
+          cache-dependency-path: |
+            ${{ inputs.service-path }}/package-lock.json
+            ${{ inputs.service-path }}/npm-shrinkwrap.json
+            ${{ inputs.service-path }}/yarn.lock
+            ${{ inputs.service-path }}/pnpm-lock.yaml
+
+      - name: Install Dependencies
+        env:
+          CUSTOM_INSTALL_COMMAND: ${{ inputs.install-command }}
+          PACKAGE_MANAGER: ${{ steps.package-manager.outputs.manager }}
+        run: |
+          if [ -n "${CUSTOM_INSTALL_COMMAND}" ]; then
+            bash -lc "${CUSTOM_INSTALL_COMMAND}"
+          elif [ "${PACKAGE_MANAGER}" = "pnpm" ]; then
+            corepack enable
+            pnpm install --frozen-lockfile
+          elif [ "${PACKAGE_MANAGER}" = "yarn" ]; then
+            corepack enable
+            yarn install --immutable || yarn install --frozen-lockfile
+          else
+            npm ci
+          fi
+
+      - name: Run Contract Tests
+        env:
+          CI: "true"
+        run: |
+          echo "Running contract tests for ${{ inputs.service-name }}..."
+          bash -lc "${{ inputs.contract-test-command }}"
+
+  e2e-tests:
+    name: "End-to-End Tests"
+    if: ${{ inputs.e2e-test-command != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ./${{ inputs.service-path }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Detect Package Manager
+        id: package-manager
+        run: |
+          INPUT_PM="${{ inputs.package-manager }}"
+          if [ -n "${INPUT_PM}" ] && [ "${INPUT_PM}" != "auto" ]; then
+            PM="${INPUT_PM}"
+          elif [ -f "pnpm-lock.yaml" ]; then
+            PM="pnpm"
+          elif [ -f "yarn.lock" ]; then
+            PM="yarn"
+          elif [ -f "package-lock.json" ] || [ -f "npm-shrinkwrap.json" ] || [ -f "package.json" ]; then
+            PM="npm"
+          else
+            echo "❌ package.json is required in ${{ inputs.service-path }}."
+            exit 1
+          fi
+
+          echo "manager=${PM}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ steps.package-manager.outputs.manager }}
+          cache-dependency-path: |
+            ${{ inputs.service-path }}/package-lock.json
+            ${{ inputs.service-path }}/npm-shrinkwrap.json
+            ${{ inputs.service-path }}/yarn.lock
+            ${{ inputs.service-path }}/pnpm-lock.yaml
+
+      - name: Install Dependencies
+        env:
+          CUSTOM_INSTALL_COMMAND: ${{ inputs.install-command }}
+          PACKAGE_MANAGER: ${{ steps.package-manager.outputs.manager }}
+        run: |
+          if [ -n "${CUSTOM_INSTALL_COMMAND}" ]; then
+            bash -lc "${CUSTOM_INSTALL_COMMAND}"
+          elif [ "${PACKAGE_MANAGER}" = "pnpm" ]; then
+            corepack enable
+            pnpm install --frozen-lockfile
+          elif [ "${PACKAGE_MANAGER}" = "yarn" ]; then
+            corepack enable
+            yarn install --immutable || yarn install --frozen-lockfile
+          else
+            npm ci
+          fi
+
+      - name: Run End-to-End Tests
+        env:
+          CI: "true"
+        run: |
+          echo "Running end-to-end tests for ${{ inputs.service-name }}..."
+          bash -lc "${{ inputs.e2e-test-command }}"
+
+  dependency-audit:
+    name: "Dependency Audit"
+    if: ${{ inputs.enable-audit }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ./${{ inputs.service-path }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Detect Package Manager
+        id: package-manager
+        run: |
+          INPUT_PM="${{ inputs.package-manager }}"
+          if [ -n "${INPUT_PM}" ] && [ "${INPUT_PM}" != "auto" ]; then
+            PM="${INPUT_PM}"
+          elif [ -f "pnpm-lock.yaml" ]; then
+            PM="pnpm"
+          elif [ -f "yarn.lock" ]; then
+            PM="yarn"
+          elif [ -f "package-lock.json" ] || [ -f "npm-shrinkwrap.json" ] || [ -f "package.json" ]; then
+            PM="npm"
+          else
+            echo "❌ package.json is required in ${{ inputs.service-path }}."
+            exit 1
+          fi
+
+          echo "manager=${PM}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ steps.package-manager.outputs.manager }}
+          cache-dependency-path: |
+            ${{ inputs.service-path }}/package-lock.json
+            ${{ inputs.service-path }}/npm-shrinkwrap.json
+            ${{ inputs.service-path }}/yarn.lock
+            ${{ inputs.service-path }}/pnpm-lock.yaml
+
+      - name: Install Dependencies
+        env:
+          CUSTOM_INSTALL_COMMAND: ${{ inputs.install-command }}
+          PACKAGE_MANAGER: ${{ steps.package-manager.outputs.manager }}
+        run: |
+          if [ -n "${CUSTOM_INSTALL_COMMAND}" ]; then
+            bash -lc "${CUSTOM_INSTALL_COMMAND}"
+          elif [ "${PACKAGE_MANAGER}" = "pnpm" ]; then
+            corepack enable
+            pnpm install --frozen-lockfile
+          elif [ "${PACKAGE_MANAGER}" = "yarn" ]; then
+            corepack enable
+            yarn install --immutable || yarn install --frozen-lockfile
+          else
+            npm ci
+          fi
+
+      - name: Run Dependency Audit
+        env:
+          PACKAGE_MANAGER: ${{ steps.package-manager.outputs.manager }}
+          CUSTOM_AUDIT_COMMAND: ${{ inputs.custom-audit-command }}
+        run: |
+          set +e
+
+          if [ -n "${CUSTOM_AUDIT_COMMAND}" ]; then
+            bash -lc "${CUSTOM_AUDIT_COMMAND}" 2>&1 | tee audit-report.txt
+            AUDIT_EXIT=${PIPESTATUS[0]}
+          else
+            case "${PACKAGE_MANAGER}" in
+              pnpm)
+                pnpm audit --audit-level=high 2>&1 | tee audit-report.txt
+                AUDIT_EXIT=${PIPESTATUS[0]}
+                ;;
+              yarn)
+                if yarn npm audit --help >/dev/null 2>&1; then
+                  yarn npm audit --all --recursive --severity high 2>&1 | tee audit-report.txt
+                  AUDIT_EXIT=${PIPESTATUS[0]}
+                else
+                  yarn audit --level high 2>&1 | tee audit-report.txt
+                  AUDIT_EXIT=${PIPESTATUS[0]}
+                fi
+                ;;
+              *)
+                npm audit --audit-level=high 2>&1 | tee audit-report.txt
+                AUDIT_EXIT=${PIPESTATUS[0]}
+                ;;
+            esac
+          fi
+
+          set -e
+
+          if [ "${AUDIT_EXIT}" -ne 0 ]; then
+            echo "❌ Dependency audit failed."
+            exit "${AUDIT_EXIT}"
+          fi
+
+          echo "✅ Dependency audit passed."
+
+      - name: Upload Audit Report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.service-name }}-${{ inputs.stack-name }}-audit
+          path: ${{ inputs.service-path }}/audit-report.txt
+          retention-days: 14
+          if-no-files-found: ignore
+
+  license-check:
+    name: "License Compliance"
+    if: ${{ inputs.enable-license-check }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ./${{ inputs.service-path }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Detect Package Manager
+        id: package-manager
+        run: |
+          INPUT_PM="${{ inputs.package-manager }}"
+          if [ -n "${INPUT_PM}" ] && [ "${INPUT_PM}" != "auto" ]; then
+            PM="${INPUT_PM}"
+          elif [ -f "pnpm-lock.yaml" ]; then
+            PM="pnpm"
+          elif [ -f "yarn.lock" ]; then
+            PM="yarn"
+          elif [ -f "package-lock.json" ] || [ -f "npm-shrinkwrap.json" ] || [ -f "package.json" ]; then
+            PM="npm"
+          else
+            echo "❌ package.json is required in ${{ inputs.service-path }}."
+            exit 1
+          fi
+
+          echo "manager=${PM}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ steps.package-manager.outputs.manager }}
+          cache-dependency-path: |
+            ${{ inputs.service-path }}/package-lock.json
+            ${{ inputs.service-path }}/npm-shrinkwrap.json
+            ${{ inputs.service-path }}/yarn.lock
+            ${{ inputs.service-path }}/pnpm-lock.yaml
+
+      - name: Install Dependencies
+        env:
+          CUSTOM_INSTALL_COMMAND: ${{ inputs.install-command }}
+          PACKAGE_MANAGER: ${{ steps.package-manager.outputs.manager }}
+        run: |
+          if [ -n "${CUSTOM_INSTALL_COMMAND}" ]; then
+            bash -lc "${CUSTOM_INSTALL_COMMAND}"
+          elif [ "${PACKAGE_MANAGER}" = "pnpm" ]; then
+            corepack enable
+            pnpm install --frozen-lockfile
+          elif [ "${PACKAGE_MANAGER}" = "yarn" ]; then
+            corepack enable
+            yarn install --immutable || yarn install --frozen-lockfile
+          else
+            npm ci
+          fi
+
+      - name: Validate Licenses
+        env:
+          ALLOWED_LICENSES: ${{ inputs.allowed-licenses }}
+        run: |
+          if [ -n "${ALLOWED_LICENSES}" ]; then
+            npx license-checker --production --excludePrivatePackages --onlyAllow "${ALLOWED_LICENSES}" --summary
+          else
+            npx license-checker --production --excludePrivatePackages --summary
+          fi
+
+  build:
+    name: "Build"
+    if: >-
+      always() &&
+      inputs.build-command != '' &&
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs:
+      - dependency-review
+      - static-analysis
+      - unit-tests
+      - integration-tests
+      - component-tests
+      - contract-tests
+      - e2e-tests
+      - dependency-audit
+      - license-check
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    outputs:
+      artifact-name: ${{ steps.artifact-metadata.outputs.name }}
+      build-result: ${{ steps.build-finished.outputs.result }}
+    defaults:
+      run:
+        working-directory: ./${{ inputs.service-path }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Detect Package Manager
+        id: package-manager
+        run: |
+          INPUT_PM="${{ inputs.package-manager }}"
+          if [ -n "${INPUT_PM}" ] && [ "${INPUT_PM}" != "auto" ]; then
+            PM="${INPUT_PM}"
+          elif [ -f "pnpm-lock.yaml" ]; then
+            PM="pnpm"
+          elif [ -f "yarn.lock" ]; then
+            PM="yarn"
+          elif [ -f "package-lock.json" ] || [ -f "npm-shrinkwrap.json" ] || [ -f "package.json" ]; then
+            PM="npm"
+          else
+            echo "❌ package.json is required in ${{ inputs.service-path }}."
+            exit 1
+          fi
+
+          echo "manager=${PM}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Build Cache
+        if: ${{ inputs.build-cache-path != '' }}
+        uses: actions/cache@v4
+        with:
+          path: ${{ inputs.service-path }}/${{ inputs.build-cache-path }}
+          key: ${{ runner.os }}-${{ inputs.stack-name }}-${{ hashFiles('**/package-lock.json', '**/npm-shrinkwrap.json', '**/yarn.lock', '**/pnpm-lock.yaml') }}-${{ hashFiles('**/*.js', '**/*.jsx', '**/*.ts', '**/*.tsx') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ inputs.stack-name }}-${{ hashFiles('**/package-lock.json', '**/npm-shrinkwrap.json', '**/yarn.lock', '**/pnpm-lock.yaml') }}-
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ steps.package-manager.outputs.manager }}
+          cache-dependency-path: |
+            ${{ inputs.service-path }}/package-lock.json
+            ${{ inputs.service-path }}/npm-shrinkwrap.json
+            ${{ inputs.service-path }}/yarn.lock
+            ${{ inputs.service-path }}/pnpm-lock.yaml
+
+      - name: Install Dependencies
+        env:
+          CUSTOM_INSTALL_COMMAND: ${{ inputs.install-command }}
+          PACKAGE_MANAGER: ${{ steps.package-manager.outputs.manager }}
+        run: |
+          if [ -n "${CUSTOM_INSTALL_COMMAND}" ]; then
+            bash -lc "${CUSTOM_INSTALL_COMMAND}"
+          elif [ "${PACKAGE_MANAGER}" = "pnpm" ]; then
+            corepack enable
+            pnpm install --frozen-lockfile
+          elif [ "${PACKAGE_MANAGER}" = "yarn" ]; then
+            corepack enable
+            yarn install --immutable || yarn install --frozen-lockfile
+          else
+            npm ci
+          fi
+
+      - name: Build Service
+        run: |
+          echo "Building ${{ inputs.service-name }}..."
+          bash -lc "${{ inputs.build-command }}"
+
+      - name: Set Artifact Metadata
+        id: artifact-metadata
+        run: |
+          ARTIFACT_NAME="${{ inputs.service-name }}-${{ inputs.stack-name }}-build"
+          echo "name=${ARTIFACT_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate Build Attestation
+        if: ${{ inputs.enable-attestation && inputs.build-output-path != '' }}
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ${{ github.workspace }}/${{ inputs.service-path }}/${{ inputs.build-output-path }}
+
+      - name: Upload Build Artifact
+        if: ${{ inputs.build-output-path != '' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ steps.artifact-metadata.outputs.name }}
+          path: ${{ inputs.service-path }}/${{ inputs.build-output-path }}
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Mark Build Result
+        id: build-finished
+        run: echo "result=success" >> "$GITHUB_OUTPUT"

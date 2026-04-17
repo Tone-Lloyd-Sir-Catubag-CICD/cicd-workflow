@@ -1,0 +1,14 @@
+{
+  "name": "React Service Pipeline",
+  "description": "Create a React web pipeline with folder discovery, component-test inference, and optional Playwright and k6 UAT.",
+  "iconName": "octicon browser",
+  "categories": [
+    "JavaScript",
+    "TypeScript",
+    "React"
+  ],
+  "filePatterns": [
+    "package.json$",
+    "^vite\\.config\\.(js|ts|mjs|cjs)$"
+  ]
+}

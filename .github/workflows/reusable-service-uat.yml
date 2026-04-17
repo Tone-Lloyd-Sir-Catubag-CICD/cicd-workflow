@@ -1,0 +1,234 @@
+name: "Reusable: Service UAT Gate"
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        required: true
+        type: string
+        description: "Display name for the service"
+      service-path:
+        required: false
+        type: string
+        default: "."
+        description: "Directory that contains the service"
+      node-version:
+        required: false
+        type: string
+        default: "24"
+        description: "Node.js version"
+      package-manager:
+        required: false
+        type: string
+        default: "auto"
+        description: "Package manager override (auto|npm|yarn|pnpm)"
+      install-command:
+        required: false
+        type: string
+        default: ""
+        description: "Optional install command override"
+      require-approval:
+        required: false
+        type: boolean
+        default: true
+        description: "Require UAT environment approval"
+      environment-name:
+        required: false
+        type: string
+        default: "uat"
+        description: "Environment name used for UAT approval"
+      uat-deploy-command:
+        required: false
+        type: string
+        default: ""
+        description: "Optional deployment command executed before UAT checks"
+      uat-command:
+        required: false
+        type: string
+        default: ""
+        description: "Optional UAT validation command"
+      uat-base-url:
+        required: false
+        type: string
+        default: ""
+        description: "Optional UAT base URL exposed to checks as BASE_URL"
+      uat-healthcheck-url:
+        required: false
+        type: string
+        default: ""
+        description: "Optional URL to poll before running UAT checks"
+      uat-timeout-seconds:
+        required: false
+        type: number
+        default: 300
+        description: "Maximum time to wait for the UAT endpoint"
+
+permissions:
+  contents: read
+
+jobs:
+  approval-required:
+    name: "UAT Approval"
+    if: ${{ inputs.require-approval }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: ${{ inputs.environment-name }}
+    steps:
+      - name: Record Approval
+        run: echo "UAT approval granted for ${{ inputs.service-name }}."
+
+  approval-skipped:
+    name: "UAT Approval Skipped"
+    if: ${{ !inputs.require-approval }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Continue Without Approval
+        run: echo "UAT approval bypassed for ${{ inputs.service-name }}."
+
+  deploy-uat:
+    name: "Deploy to UAT"
+    if: >-
+      always() &&
+      inputs.uat-deploy-command != '' &&
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs:
+      - approval-required
+      - approval-skipped
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: ./${{ inputs.service-path }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Run UAT Deployment Command
+        env:
+          BASE_URL: ${{ inputs.uat-base-url }}
+          UAT_BASE_URL: ${{ inputs.uat-base-url }}
+        run: |
+          echo "Deploying ${{ inputs.service-name }} to UAT..."
+          bash -lc "${{ inputs.uat-deploy-command }}"
+
+  wait-for-uat:
+    name: "Wait for UAT Health"
+    if: >-
+      always() &&
+      (inputs.uat-base-url != '' || inputs.uat-healthcheck-url != '') &&
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs:
+      - approval-required
+      - approval-skipped
+      - deploy-uat
+    steps:
+      - name: Wait for Service to Become Healthy
+        env:
+          TARGET_URL: ${{ inputs.uat-healthcheck-url != '' && inputs.uat-healthcheck-url || inputs.uat-base-url }}
+          TIMEOUT_SECONDS: ${{ inputs.uat-timeout-seconds }}
+        run: |
+          if [ -z "${TARGET_URL}" ]; then
+            echo "No UAT healthcheck URL provided."
+            exit 0
+          fi
+
+          DEADLINE=$((SECONDS + TIMEOUT_SECONDS))
+          until [ "${SECONDS}" -ge "${DEADLINE}" ]; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${TARGET_URL}" || echo "000")
+            if [ "${STATUS}" = "200" ] || [ "${STATUS}" = "201" ] || [ "${STATUS}" = "204" ] || [ "${STATUS}" = "301" ] || [ "${STATUS}" = "302" ]; then
+              echo "UAT endpoint is ready: ${TARGET_URL} (${STATUS})"
+              exit 0
+            fi
+
+            echo "Waiting for ${TARGET_URL} (status ${STATUS})..."
+            sleep 10
+          done
+
+          echo "❌ Timed out waiting for UAT endpoint: ${TARGET_URL}"
+          exit 1
+
+  run-uat-command:
+    name: "Run UAT Validation"
+    if: >-
+      always() &&
+      inputs.uat-command != '' &&
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs:
+      - approval-required
+      - approval-skipped
+      - deploy-uat
+      - wait-for-uat
+    defaults:
+      run:
+        working-directory: ./${{ inputs.service-path }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Detect Package Manager
+        id: package-manager
+        run: |
+          INPUT_PM="${{ inputs.package-manager }}"
+          if [ -n "${INPUT_PM}" ] && [ "${INPUT_PM}" != "auto" ]; then
+            PM="${INPUT_PM}"
+          elif [ -f "pnpm-lock.yaml" ]; then
+            PM="pnpm"
+          elif [ -f "yarn.lock" ]; then
+            PM="yarn"
+          elif [ -f "package-lock.json" ] || [ -f "npm-shrinkwrap.json" ] || [ -f "package.json" ]; then
+            PM="npm"
+          else
+            echo "❌ package.json is required in ${{ inputs.service-path }}."
+            exit 1
+          fi
+
+          echo "manager=${PM}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ steps.package-manager.outputs.manager }}
+          cache-dependency-path: |
+            ${{ inputs.service-path }}/package-lock.json
+            ${{ inputs.service-path }}/npm-shrinkwrap.json
+            ${{ inputs.service-path }}/yarn.lock
+            ${{ inputs.service-path }}/pnpm-lock.yaml
+
+      - name: Install Dependencies
+        env:
+          CUSTOM_INSTALL_COMMAND: ${{ inputs.install-command }}
+          PACKAGE_MANAGER: ${{ steps.package-manager.outputs.manager }}
+        run: |
+          if [ -n "${CUSTOM_INSTALL_COMMAND}" ]; then
+            bash -lc "${CUSTOM_INSTALL_COMMAND}"
+          elif [ "${PACKAGE_MANAGER}" = "pnpm" ]; then
+            corepack enable
+            pnpm install --frozen-lockfile
+          elif [ "${PACKAGE_MANAGER}" = "yarn" ]; then
+            corepack enable
+            yarn install --immutable || yarn install --frozen-lockfile
+          else
+            npm ci
+          fi
+
+      - name: Run UAT Command
+        env:
+          BASE_URL: ${{ inputs.uat-base-url }}
+          UAT_BASE_URL: ${{ inputs.uat-base-url }}
+          UAT_HEALTHCHECK_URL: ${{ inputs.uat-healthcheck-url }}
+        run: |
+          echo "Running UAT validation for ${{ inputs.service-name }}..."
+          bash -lc "${{ inputs.uat-command }}"

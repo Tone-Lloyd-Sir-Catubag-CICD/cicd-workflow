@@ -1,0 +1,230 @@
+name: "Service: Next.js"
+
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        required: true
+        type: string
+        description: "Display name for the Next.js service"
+      service-path:
+        required: false
+        type: string
+        default: "."
+        description: "Directory that contains the service"
+      node-version:
+        required: false
+        type: string
+        default: "24"
+        description: "Node.js version"
+      package-manager:
+        required: false
+        type: string
+        default: "auto"
+        description: "Package manager override (auto|npm|yarn|pnpm)"
+      install-command:
+        required: false
+        type: string
+        default: ""
+        description: "Optional install command override"
+      lint-command:
+        required: false
+        type: string
+        default: "npm run lint"
+        description: "Lint command"
+      format-command:
+        required: false
+        type: string
+        default: ""
+        description: "Format validation command"
+      typecheck-command:
+        required: false
+        type: string
+        default: "npx tsc --noEmit"
+        description: "Type-check command"
+      unit-test-command:
+        required: false
+        type: string
+        default: ""
+        description: "Optional unit test command"
+      component-test-command:
+        required: false
+        type: string
+        default: "npm test -- --watch=false --coverage"
+        description: "Component test command"
+      build-command:
+        required: false
+        type: string
+        default: "npm run build"
+        description: "Build command"
+      build-output-path:
+        required: false
+        type: string
+        default: ".next"
+        description: "Build output folder or file"
+      coverage-threshold:
+        required: false
+        type: number
+        default: 80
+        description: "Minimum line coverage percentage"
+      enable-dependency-review:
+        required: false
+        type: boolean
+        default: false
+        description: "Run GitHub dependency review on pull requests"
+      enable-audit:
+        required: false
+        type: boolean
+        default: true
+        description: "Run dependency audit"
+      custom-audit-command:
+        required: false
+        type: string
+        default: ""
+        description: "Optional audit command override"
+      enable-license-check:
+        required: false
+        type: boolean
+        default: true
+        description: "Run license compliance checks"
+      enable-attestation:
+        required: false
+        type: boolean
+        default: false
+        description: "Generate build provenance attestation"
+      uat-deploy-command:
+        required: false
+        type: string
+        default: ""
+        description: "Optional command to deploy the service to UAT"
+      uat-base-url:
+        required: false
+        type: string
+        default: ""
+        description: "Base URL for UAT checks"
+      uat-healthcheck-url:
+        required: false
+        type: string
+        default: ""
+        description: "Optional URL to poll before UAT checks"
+      require-uat-approval:
+        required: false
+        type: boolean
+        default: true
+        description: "Require UAT environment approval"
+      run-playwright:
+        required: false
+        type: boolean
+        default: false
+        description: "Run Playwright UAT checks"
+      playwright-command:
+        required: false
+        type: string
+        default: "npx playwright test --project={browser}"
+        description: "Playwright command; use {browser} to receive the matrix browser"
+      playwright-tests-directory:
+        required: false
+        type: string
+        default: "tests/e2e"
+        description: "Playwright test folder"
+      playwright-browsers:
+        required: false
+        type: string
+        default: "[\"chromium\"]"
+        description: "Browser list as JSON array or CSV"
+      run-k6:
+        required: false
+        type: boolean
+        default: false
+        description: "Run local k6 checks against UAT"
+      k6-command:
+        required: false
+        type: string
+        default: ""
+        description: "Optional k6 command override"
+      k6-script-path:
+        required: false
+        type: string
+        default: "tests/performance"
+        description: "k6 script or directory path"
+      require-production-approval:
+        required: false
+        type: boolean
+        default: false
+        description: "Require production approval gate"
+      production-staging-url:
+        required: false
+        type: string
+        default: ""
+        description: "Optional URL re-used by the production gate"
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: "Next.js Quality"
+    uses: ./.github/workflows/reusable-javascript-quality.yml
+    with:
+      service-name: ${{ inputs.service-name }}
+      service-path: ${{ inputs.service-path }}
+      stack-name: nextjs
+      node-version: ${{ inputs.node-version }}
+      package-manager: ${{ inputs.package-manager }}
+      install-command: ${{ inputs.install-command }}
+      lint-command: ${{ inputs.lint-command }}
+      format-command: ${{ inputs.format-command }}
+      typecheck-command: ${{ inputs.typecheck-command }}
+      unit-test-command: ${{ inputs.unit-test-command }}
+      component-test-command: ${{ inputs.component-test-command }}
+      build-command: ${{ inputs.build-command }}
+      build-output-path: ${{ inputs.build-output-path }}
+      build-cache-path: .next/cache
+      coverage-threshold: ${{ inputs.coverage-threshold }}
+      enable-dependency-review: ${{ inputs.enable-dependency-review }}
+      enable-audit: ${{ inputs.enable-audit }}
+      custom-audit-command: ${{ inputs.custom-audit-command }}
+      enable-license-check: ${{ inputs.enable-license-check }}
+      enable-attestation: ${{ inputs.enable-attestation }}
+    secrets: inherit
+
+  uat:
+    name: "Next.js UAT"
+    if: ${{ inputs.uat-deploy-command != '' || inputs.uat-base-url != '' || inputs.uat-healthcheck-url != '' || inputs.run-playwright || inputs.run-k6 }}
+    needs: [quality]
+    uses: ./.github/workflows/reusable-web-uat.yml
+    with:
+      service-name: ${{ inputs.service-name }}
+      service-path: ${{ inputs.service-path }}
+      node-version: ${{ inputs.node-version }}
+      package-manager: ${{ inputs.package-manager }}
+      install-command: ${{ inputs.install-command }}
+      require-approval: ${{ inputs.require-uat-approval }}
+      uat-deploy-command: ${{ inputs.uat-deploy-command }}
+      uat-base-url: ${{ inputs.uat-base-url }}
+      uat-healthcheck-url: ${{ inputs.uat-healthcheck-url }}
+      run-playwright: ${{ inputs.run-playwright }}
+      playwright-command: ${{ inputs.playwright-command }}
+      playwright-tests-directory: ${{ inputs.playwright-tests-directory }}
+      playwright-browsers: ${{ inputs.playwright-browsers }}
+      run-k6: ${{ inputs.run-k6 }}
+      k6-command: ${{ inputs.k6-command }}
+      k6-script-path: ${{ inputs.k6-script-path }}
+    secrets: inherit
+
+  production-gate:
+    name: "Next.js Production Gate"
+    if: >-
+      always() &&
+      inputs.require-production-approval &&
+      needs.quality.result == 'success' &&
+      (needs.uat.result == 'success' || needs.uat.result == 'skipped')
+    needs:
+      - quality
+      - uat
+    uses: ./.github/workflows/production-gate.yml
+    with:
+      system-dir: ${{ inputs.service-path }}
+      app-type: web
+      staging-url: ${{ inputs.production-staging-url != '' && inputs.production-staging-url || inputs.uat-base-url }}
+      require-approval: true

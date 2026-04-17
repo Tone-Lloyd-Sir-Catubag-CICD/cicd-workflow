@@ -1,0 +1,15 @@
+{
+  "name": "Expo Service Pipeline",
+  "description": "Create an Expo pipeline with folder discovery, local mobile validation, and optional EAS build support.",
+  "iconName": "octicon rocket",
+  "categories": [
+    "JavaScript",
+    "TypeScript",
+    "React Native"
+  ],
+  "filePatterns": [
+    "package.json$",
+    "^app\\.json$",
+    "^app\\.config\\.(js|ts|mjs)$"
+  ]
+}

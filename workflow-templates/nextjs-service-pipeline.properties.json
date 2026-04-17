@@ -1,0 +1,14 @@
+{
+  "name": "Next.js Service Pipeline",
+  "description": "Create a Next.js pipeline with folder discovery, CI cache support, and optional Playwright and k6 UAT.",
+  "iconName": "octicon globe",
+  "categories": [
+    "JavaScript",
+    "TypeScript",
+    "Next.js"
+  ],
+  "filePatterns": [
+    "package.json$",
+    "^next\\.config\\.(js|ts|mjs|cjs)$"
+  ]
+}

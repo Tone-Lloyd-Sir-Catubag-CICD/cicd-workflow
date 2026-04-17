@@ -30,6 +30,7 @@ Local templates:
 
 Central caller templates:
 - [template-callers.md](template-callers.md)
+- [stack-onboarding-templates.md](stack-onboarding-templates.md)
 
 Remote-sourced templates:
 - [template-mobile-multi-remote.md](template-mobile-multi-remote.md)
