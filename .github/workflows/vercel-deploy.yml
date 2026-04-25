@@ -1,0 +1,262 @@
+﻿# Contract: docs/workflows/vercel-deploy.md
+# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+# â•‘  REUSABLE: Vercel Deployment                                   â•‘
+# â•‘  Handles UAT (preview) and Production deploys                 â•‘
+# â•‘  Monorepo: each sub-project has its own VERCEL_PROJECT_ID     â•‘
+# â•‘                                                                â•‘
+# â•‘  Required repo secrets (per sub-project):                     â•‘
+# â•‘    VERCEL_TOKEN              â€” shared Vercel API token         â•‘
+# â•‘    VERCEL_ORG_ID             â€” shared Vercel Org/Team ID      â•‘
+# â•‘    VERCEL_PROJECT_ID_BAYANIHUB_WEB                            â•‘
+# â•‘    VERCEL_PROJECT_ID_DAMAYAN_WEB                              â•‘
+# â•‘    VERCEL_PROJECT_ID_HOPECARD_WEB                             â•‘
+# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+name: "Reusable: Vercel Deploy"
+
+on:
+  workflow_call:
+    inputs:
+      system-name:
+        required: false
+        type: string
+        default: ""
+        description: "System name used for deployment metadata mapping"
+      working-directory:
+        required: true
+        type: string
+        description: "Project directory (e.g. BayaniHub-Web)"
+      environment:
+        required: false
+        type: string
+        default: "preview"
+        description: "Deployment environment (preview|production)"
+    secrets:
+      VERCEL_TOKEN:
+        required: true
+      VERCEL_ORG_ID:
+        required: true
+      VERCEL_PROJECT_ID:
+        required: true
+      GH_PR_TOKEN:
+        required: false
+    outputs:
+      deployment_url:
+        description: "Vercel deployment URL"
+        value: ${{ jobs.vercel-deploy.outputs.url }}
+      deployment_id:
+        description: "Vercel deployment ID"
+        value: ${{ jobs.vercel-deploy.outputs.id }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vercel-deploy-${{ inputs.environment }}-${{ inputs.system-name || inputs.working-directory }}
+  cancel-in-progress: false
+
+jobs:
+  vercel-deploy:
+    name: "Deploy to Vercel (${{ inputs.environment }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ steps.deploy.outputs.url }}
+    outputs:
+      url: ${{ steps.deploy.outputs.url }}
+      id: ${{ steps.deploy.outputs.id }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Validate Project Directory
+        run: |
+          if [ ! -f "package.json" ]; then
+            echo "âŒ package.json not found in ./${{ inputs.working-directory }}"
+            echo "This usually means Vercel Root Directory is misconfigured for this project."
+            echo "Set Vercel Root Directory to '.' for this linked sub-project context."
+            exit 1
+          fi
+        working-directory: ./${{ inputs.working-directory }}
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel@50.22.1
+
+      - name: Pull and Build with Vercel (adaptive context)
+        id: prepare
+        run: |
+          set -uo pipefail
+
+          run_pull_build() {
+            local dir="$1"
+            echo "ðŸ”Ž Trying Vercel pull/build in: $dir"
+
+            pushd "$dir" > /dev/null
+
+            vercel pull --yes --environment=${{ inputs.environment }} --token="${VERCEL_TOKEN}"
+            local pull_status=$?
+            if [ $pull_status -ne 0 ]; then
+              echo "âŒ vercel pull failed in $dir"
+              popd > /dev/null
+              return 1
+            fi
+
+            if [ "${{ inputs.environment }}" = "production" ]; then
+              vercel build --prod --token="${VERCEL_TOKEN}"
+            else
+              vercel build --token="${VERCEL_TOKEN}"
+            fi
+            local build_status=$?
+            if [ $build_status -ne 0 ]; then
+              echo "âŒ vercel build failed in $dir"
+              popd > /dev/null
+              return 1
+            fi
+
+            if [ ! -d ".vercel/output" ]; then
+              echo "âŒ .vercel/output not found in $dir"
+              popd > /dev/null
+              return 1
+            fi
+
+            popd > /dev/null
+            return 0
+          }
+
+          if run_pull_build "./${{ inputs.working-directory }}"; then
+            echo "deploy_dir=./${{ inputs.working-directory }}" >> "$GITHUB_OUTPUT"
+            echo "âœ… Using deploy directory: ./${{ inputs.working-directory }}"
+          elif run_pull_build "."; then
+            echo "deploy_dir=." >> "$GITHUB_OUTPUT"
+            echo "âœ… Using deploy directory: ."
+          else
+            echo "âŒ Vercel pull/build failed in both contexts."
+            echo "Check VERCEL_PROJECT_ID mapping and Root Directory in Vercel project settings."
+            exit 1
+          fi
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Deploy to Vercel
+        id: deploy
+        run: |
+          BRANCH_NAME="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
+          SYSTEM_NAME="${{ inputs.system-name }}"
+
+          META_ARGS=(--meta githubCommitRef="${BRANCH_NAME}" --meta githubCommitSha="${GITHUB_SHA}")
+          if [ -n "${SYSTEM_NAME}" ]; then
+            META_ARGS+=(--meta systemName="${SYSTEM_NAME}")
+          fi
+
+          if [ "${{ inputs.environment }}" = "production" ]; then
+            DEPLOY_OUTPUT=$(vercel deploy --prebuilt --prod --token="${VERCEL_TOKEN}" "${META_ARGS[@]}" 2>&1)
+          else
+            DEPLOY_OUTPUT=$(vercel deploy --prebuilt --token="${VERCEL_TOKEN}" "${META_ARGS[@]}" 2>&1)
+          fi
+
+          URL=$(echo "${DEPLOY_OUTPUT}" | grep -Eo 'https://[^[:space:]]+' | tail -n 1 | tr -d '\r')
+
+          if [ -z "${URL}" ]; then
+            echo "âŒ Failed to extract deployment URL from Vercel output."
+            echo "${DEPLOY_OUTPUT}"
+            exit 1
+          fi
+
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          echo "ðŸš€ Deployed to: $URL"
+
+          # Fetch deployment ID from Vercel API using the deployment URL
+          HOSTNAME="${URL#https://}"
+          DEP_ID=$(curl -sS \
+            -H "Authorization: Bearer ${VERCEL_TOKEN}" \
+            "https://api.vercel.com/v13/deployments?url=${HOSTNAME}&projectId=${VERCEL_PROJECT_ID}&limit=1" \
+            | jq -r '.deployments[0].uid // ""' 2>/dev/null || true)
+
+          if [ -n "${DEP_ID}" ]; then
+            echo "id=${DEP_ID}" >> $GITHUB_OUTPUT
+            echo "ðŸ†” Deployment ID: ${DEP_ID}"
+          else
+            echo "âš ï¸ Could not resolve deployment ID from Vercel API â€” id output will be empty."
+            echo "id=" >> $GITHUB_OUTPUT
+          fi
+        working-directory: ${{ steps.prepare.outputs.deploy_dir }}
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Cleanup previous branch preview deployments
+        if: ${{ inputs.environment == 'preview' }}
+        run: |
+          set -euo pipefail
+
+          BRANCH_NAME="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
+          CURRENT_URL="${{ steps.deploy.outputs.url }}"
+
+          if [ -z "${CURRENT_URL}" ]; then
+            echo "âš ï¸ Current deployment URL is empty; skipping cleanup."
+            exit 0
+          fi
+
+          API_URL="https://api.vercel.com/v6/deployments?projectId=${VERCEL_PROJECT_ID}&target=preview&meta-githubCommitRef=${BRANCH_NAME}&limit=100"
+          RESPONSE=$(curl -sS -H "Authorization: Bearer ${VERCEL_TOKEN}" "${API_URL}")
+
+          if ! echo "${RESPONSE}" | jq -e . >/dev/null 2>&1; then
+            echo "âš ï¸ Invalid response from Vercel API; skipping cleanup."
+            exit 0
+          fi
+
+          OLD_URLS=$(echo "${RESPONSE}" | jq -r --arg current "${CURRENT_URL}" '
+            [.deployments[]?
+              | select((.state // "") == "READY")
+              | select((.url // "") != "")
+              | ("https://" + .url)
+              | select(. != $current)
+            ] | unique | .[]
+          ')
+
+          if [ -z "${OLD_URLS}" ]; then
+            echo "â„¹ï¸ No previous preview deployments found for branch '${BRANCH_NAME}'."
+            exit 0
+          fi
+
+          echo "ðŸ§¹ Removing previous preview deployments for branch '${BRANCH_NAME}'..."
+          while IFS= read -r OLD_URL; do
+            if [ -n "${OLD_URL}" ]; then
+              echo "- Removing ${OLD_URL}"
+              vercel remove "${OLD_URL}" --yes --token="${VERCEL_TOKEN}" || echo "âš ï¸ Failed to remove ${OLD_URL}; continuing."
+            fi
+          done <<< "${OLD_URLS}"
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Comment Deployment URL on PR
+        if: ${{ github.event_name == 'pull_request' }}
+        continue-on-error: true
+        uses: actions/github-script@v7
+        env:
+          GH_TOKEN: ${{ secrets.GH_PR_TOKEN }}
+        with:
+          script: |
+            if (!process.env.GH_TOKEN) {
+              core.info('GH_PR_TOKEN is not set; skipping PR deployment comment.');
+              return;
+            }
+
+            const url = '${{ steps.deploy.outputs.url }}';
+            const body = `## ðŸš€ Vercel Preview Deployment\n\n` +
+              `**Project:** \`${{ inputs.working-directory }}\`\n` +
+              `**Environment:** \`${{ inputs.environment }}\`\n` +
+              `**URL:** ${url}\n` +
+              `**Commit:** \`${{ github.sha }}\``;
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+
+

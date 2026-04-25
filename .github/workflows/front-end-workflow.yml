@@ -1,0 +1,162 @@
+﻿# Contract: docs/workflows/front-end-workflow.md
+# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+# â•‘  ORCHESTRATOR: Frontend Web CI/CD Pipeline                     â•‘
+# â•‘  Composes reusable workflows: test â†’ lint â†’ security â†’         â•‘
+# â•‘  governance â†’ sonar â†’ build                                     â•‘
+# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+name: "Frontend Web CI/CD Pipeline"
+
+on:
+  workflow_call:
+    inputs:
+      system-dir:
+        required: false
+        type: string
+        default: "."
+        description: "Project directory (e.g. BayaniHub-Web, or '.' for root)"
+      system-name:
+        required: true
+        type: string
+        description: "System name for artifacts/display (e.g. BayaniHub-Web)"
+      node-version:
+        required: false
+        type: number
+        default: 24
+        description: "Node.js version"
+      coverage-threshold:
+        required: false
+        type: number
+        default: 80
+        description: "Minimum code coverage percentage required"
+      enable-lint:
+        required: false
+        type: boolean
+        default: true
+        description: "Run lint checks"
+      enable-security-scan:
+        required: false
+        type: boolean
+        default: true
+        description: "Run security scanning"
+      enable-governance:
+        required: false
+        type: boolean
+        default: true
+        description: "Run governance checks"
+
+permissions:
+  contents: read
+
+jobs:
+  # â”€â”€ Stage 0: Frontend Standards â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  web-standards:
+    name: "Web â€” Standards Check"
+    uses: ./.github/workflows/frontend-standards-check.yml
+    with:
+      working-directory: ${{ inputs.system-dir }}
+      system-name: ${{ inputs.system-name }}
+      node-version: ${{ inputs.node-version }}
+
+  # â”€â”€ Stage 1A: Unit Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  web-unit-tests:
+    name: "Web â€” Unit Tests"
+    uses: ./.github/workflows/frontend-tests.yml
+    with:
+      working-directory: ${{ inputs.system-dir }}
+      system-name: ${{ inputs.system-name }}
+      node-version: ${{ inputs.node-version }}
+      # runInBand reduces transient Jest worker crashes in CI
+      test-command: npm run test -- --coverage --coverageReporters=json-summary --runInBand tests/unit
+      coverage-threshold: ${{ inputs.coverage-threshold }}
+
+  # â”€â”€ Stage 1B: Lint (parallel with tests) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  web-lint:
+    name: "Web â€” Lint Check"
+    if: ${{ inputs.enable-lint }}
+    uses: ./.github/workflows/lint-check.yml
+    with:
+      working-directory: ${{ inputs.system-dir }}
+      system-name: ${{ inputs.system-name }}
+      node-version: ${{ inputs.node-version }}
+
+  # â”€â”€ Stage 1C: Security Scan (parallel with tests) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  web-security:
+    name: "Web â€” Security Scan"
+    if: ${{ inputs.enable-security-scan }}
+    uses: ./.github/workflows/security-scan.yml
+    with:
+      working-directory: ${{ inputs.system-dir }}
+      system-name: ${{ inputs.system-name }}
+      node-version: ${{ inputs.node-version }}
+      # Enforce HIGH/CRITICAL findings on all branches, including test.
+      fail-on-high: true
+
+  # â”€â”€ Stage 1D: Governance Checks (parallel with tests/lint/security) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  web-governance:
+    name: "Web â€” Governance Checks"
+    if: ${{ inputs.enable-governance }}
+    uses: ./.github/workflows/governance-check.yml
+    with:
+      working-directory: ${{ inputs.system-dir }}
+      system-name: ${{ inputs.system-name }}
+      node-version: ${{ inputs.node-version }}
+      test-command: npm run test -- --coverage --testPathPatterns="tests/unit" --coverageReporters=json-summary
+      coverage-threshold: ${{ inputs.coverage-threshold }}
+
+  # â”€â”€ Stage 2: Build Web Application â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  web-build:
+    name: "Web â€” Build"
+    needs: [web-standards, web-unit-tests, web-lint, web-security, web-governance]
+    if: |
+      always() &&
+      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Validate build working directory
+        run: |
+          TARGET_DIR="${{ inputs.system-dir }}"
+          CLEAN_DIR="${TARGET_DIR#./}"
+          CLEAN_DIR="${CLEAN_DIR%/}"
+
+          if [ -z "${CLEAN_DIR}" ] || [ "${CLEAN_DIR}" = "." ]; then
+            echo "âœ… Using repository root as build directory."
+            exit 0
+          fi
+
+          if [ ! -d "${CLEAN_DIR}" ]; then
+            echo "âŒ Build directory not found: ${TARGET_DIR}"
+            echo "Repository root contents:"
+            ls -la
+            exit 1
+          fi
+
+          echo "âœ… Build directory exists: ${TARGET_DIR}"
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+          cache-dependency-path: |
+            **/package-lock.json
+
+      - name: Install Dependencies
+        working-directory: ./${{ inputs.system-dir }}
+        run: npm ci --ignore-scripts
+
+      - name: Build Application
+        working-directory: ./${{ inputs.system-dir }}
+        run: npm run build
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.system-name }}-web-build
+          path: ${{ inputs.system-dir }}/.next
+          retention-days: 14
+
+

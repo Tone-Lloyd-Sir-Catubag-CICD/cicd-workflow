@@ -1,0 +1,114 @@
+﻿# Contract: docs/workflows/frontend-standards-check.md
+name: "Reusable: Frontend Standards Check"
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        required: false
+        type: string
+        default: "."
+        description: "Project directory (e.g. BayaniHub-Web, or '.' for root)"
+      system-name:
+        required: true
+        type: string
+        description: "System name for display"
+      node-version:
+        required: false
+        type: number
+        default: 24
+        description: "Node.js version"
+
+permissions:
+  contents: read
+
+jobs:
+  standards-check:
+    name: "Frontend Standards Check"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ./${{ inputs.working-directory }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+          cache-dependency-path: |
+            **/package-lock.json
+
+      - name: Install Dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Validate React + Strict TypeScript Standard (Next.js or Vite)
+        run: |
+          if [ ! -f "tsconfig.json" ]; then
+            echo "âŒ tsconfig.json is required for frontend projects."
+            exit 1
+          fi
+
+          node -e "
+            const fs = require('fs');
+            const path = require('path');
+
+            const pkg = require('./package.json');
+            const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+
+            const hasNext = Boolean(deps.next);
+            const hasVite = Boolean(deps.vite);
+            const hasReact = Boolean(deps.react);
+            const hasReactDom = Boolean(deps['react-dom']);
+            const hasTypeScript = Boolean(deps.typescript);
+
+            if (!hasNext && !hasVite) throw new Error('Frontend standard requires either Next.js (\"next\") or Vite (\"vite\") as the framework.');
+            if (!hasReact || !hasReactDom) throw new Error('Frontend standard requires React + ReactDOM (dependencies \"react\" and \"react-dom\").');
+            if (!hasTypeScript) throw new Error('Frontend standard requires TypeScript (dependency \"typescript\" missing).');
+
+            const tsconfig = JSON.parse(fs.readFileSync('tsconfig.json', 'utf8'));
+            if (tsconfig?.compilerOptions?.strict !== true) {
+              throw new Error('TypeScript strict mode is required (tsconfig.compilerOptions.strict must be true).');
+            }
+
+            const root = process.cwd();
+            const includeRoots = ['src', 'app', 'pages', 'components', 'lib']
+              .map((dir) => path.join(root, dir))
+              .filter((dir) => fs.existsSync(dir) && fs.statSync(dir).isDirectory());
+
+            if (includeRoots.length === 0) {
+              throw new Error('Could not find source directory (expected one of: src, app, pages, components, lib).');
+            }
+
+            const jsLike = [];
+            const tsLike = [];
+            const skipDirs = new Set(['node_modules', '.next', 'dist', 'build', 'coverage', '.git']);
+
+            function walk(dir) {
+              for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                const fullPath = path.join(dir, entry.name);
+                if (entry.isDirectory()) {
+                  if (!skipDirs.has(entry.name)) walk(fullPath);
+                  continue;
+                }
+
+                if (/\.(js|jsx)$/.test(entry.name)) jsLike.push(path.relative(root, fullPath));
+                if (/\.(ts|tsx)$/.test(entry.name)) tsLike.push(path.relative(root, fullPath));
+              }
+            }
+
+            includeRoots.forEach(walk);
+
+            if (tsLike.length === 0) {
+              throw new Error('Frontend standard requires TypeScript source files (.ts/.tsx) in source directories.');
+            }
+
+            if (jsLike.length > 0) {
+              throw new Error('Strict TypeScript enforcement failed: found JS/JSX source files:\n' + jsLike.slice(0, 20).join('\n'));
+            }
+          "
+
+

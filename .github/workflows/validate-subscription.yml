@@ -1,0 +1,35 @@
+﻿# Contract: docs/workflows/validate-subscription.md
+name: "Validate CI Subscription"
+
+on:
+  workflow_call:
+    secrets:
+      CI_TOKEN:
+        required: true
+        description: "Per-user subscription token issued by the platform"
+
+jobs:
+  validate:
+    name: "Validate subscription"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate CI token
+        run: |
+          RESPONSE=$(curl -sf -w "\n%{http_code}" \
+            -X POST \
+            -H "Authorization: Bearer ${{ secrets.CI_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"repo\":\"${{ github.repository }}\"}" \
+            https://api.implementsprint.com/v1/ci/validate) || true
+
+          HTTP_CODE=$(printf '%s' "$RESPONSE" | tail -1)
+          BODY=$(printf '%s' "$RESPONSE" | head -n -1)
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Subscription validation failed (HTTP $HTTP_CODE). ${BODY}"
+            echo "::error::Ensure CI_TOKEN is set and your subscription is active."
+            exit 1
+          fi
+
+          echo "Subscription validated. Pipeline authorised to proceed."
+

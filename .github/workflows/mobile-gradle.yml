@@ -1,0 +1,377 @@
+﻿# Contract: docs/workflows/mobile-gradle.md
+name: "Reusable: Mobile Gradle Build"
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        required: false
+        type: string
+        default: "."
+        description: "Project directory (e.g. BayaniHub-Mobile, or '.' for root)"
+      system-name:
+        required: true
+        type: string
+        description: "System name for artifacts/display"
+      node-version:
+        required: false
+        type: number
+        default: 24
+        description: "Node.js version"
+      java-version:
+        required: false
+        type: string
+        default: "17"
+        description: "JDK version"
+      project-type:
+        required: false
+        type: string
+        default: "auto"
+        description: "Project type (auto|react-native|kotlin)"
+      gradle-task:
+        required: false
+        type: string
+        default: "assembleDebug"
+        description: "Gradle task to run"
+      android-build-command:
+        required: false
+        type: string
+        default: ""
+        description: "Optional full Android build command override"
+      enable-docker-build:
+        required: false
+        type: boolean
+        default: false
+        description: "Build and optionally push Docker image"
+      docker-image-name:
+        required: false
+        type: string
+        default: ""
+        description: "Docker image name for GHCR (required when Docker build is enabled)"
+      dockerfile-path:
+        required: false
+        type: string
+        default: "Dockerfile"
+        description: "Path to Dockerfile relative to working-directory"
+      upload-artifact:
+        required: false
+        type: boolean
+        default: true
+        description: "Upload Android build outputs"
+
+permissions:
+  contents: read
+
+jobs:
+  gradle-build:
+    name: "Gradle Android Build"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ./${{ inputs.working-directory }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Detect project toolchain
+        id: detect
+        run: |
+          INPUT_TYPE="${{ inputs.project-type }}"
+          if [ -z "${INPUT_TYPE}" ]; then
+            INPUT_TYPE="auto"
+          fi
+
+          STACK="${INPUT_TYPE}"
+          if [ "${STACK}" = "auto" ]; then
+            if [ -f "package.json" ]; then
+              STACK="react-native"
+            else
+              STACK="kotlin"
+            fi
+          fi
+
+          if [ -f "yarn.lock" ]; then
+            PM="yarn"
+          elif [ -f "pnpm-lock.yaml" ]; then
+            PM="pnpm"
+          elif [ -f "package-lock.json" ] || [ -f "npm-shrinkwrap.json" ] || [ -f "package.json" ]; then
+            PM="npm"
+          else
+            PM="none"
+          fi
+
+          if [ "${STACK}" = "react-native" ] && [ "${PM}" = "none" ]; then
+            PM="npm"
+          fi
+
+          echo "stack=${STACK}" >> "$GITHUB_OUTPUT"
+          echo "package_manager=${PM}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js ${{ inputs.node-version }} (npm)
+        if: ${{ steps.detect.outputs.stack == 'react-native' && steps.detect.outputs.package_manager == 'npm' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+          cache-dependency-path: |
+            **/package-lock.json
+
+      - name: Setup Node.js ${{ inputs.node-version }} (yarn)
+        if: ${{ steps.detect.outputs.stack == 'react-native' && steps.detect.outputs.package_manager == 'yarn' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "yarn"
+          cache-dependency-path: |
+            **/yarn.lock
+
+      - name: Setup Node.js ${{ inputs.node-version }} (pnpm)
+        if: ${{ steps.detect.outputs.stack == 'react-native' && steps.detect.outputs.package_manager == 'pnpm' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "pnpm"
+          cache-dependency-path: |
+            **/pnpm-lock.yaml
+
+      - name: Install Dependencies
+        if: ${{ steps.detect.outputs.stack == 'react-native' }}
+        env:
+          PACKAGE_MANAGER: ${{ steps.detect.outputs.package_manager }}
+        run: |
+          if [ "${PACKAGE_MANAGER}" = "yarn" ]; then
+            corepack enable
+            yarn install --frozen-lockfile --ignore-scripts
+          elif [ "${PACKAGE_MANAGER}" = "pnpm" ]; then
+            corepack enable
+            pnpm install --frozen-lockfile --ignore-scripts
+          else
+            npm ci --ignore-scripts
+          fi
+
+      - name: Ensure required React Native CLI dependencies
+        if: ${{ steps.detect.outputs.stack == 'react-native' }}
+        env:
+          PACKAGE_MANAGER: ${{ steps.detect.outputs.package_manager }}
+        run: |
+          MISSING_PACKAGES=$(node <<'NODE'
+          const fs = require('fs');
+          const required = [
+            '@react-native-community/cli',
+            '@react-native-community/cli-platform-android',
+            '@react-native-community/cli-platform-ios',
+          ];
+
+          if (!fs.existsSync('package.json')) {
+            process.stdout.write(required.join(' '));
+            process.exit(0);
+          }
+
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const deps = {
+            ...(pkg.dependencies || {}),
+            ...(pkg.devDependencies || {}),
+            ...(pkg.peerDependencies || {}),
+          };
+
+          const missing = required.filter((name) => !deps[name]);
+          process.stdout.write(missing.join(' '));
+          NODE
+          )
+
+          if [ -z "${MISSING_PACKAGES}" ]; then
+            echo "âœ… Required React Native CLI dependencies are present."
+            exit 0
+          fi
+
+          echo "âš ï¸ Missing React Native CLI dependencies: ${MISSING_PACKAGES}"
+          echo "â„¹ï¸ Installing missing dependencies to keep CI builds stable."
+
+          if [ "${PACKAGE_MANAGER}" = "yarn" ]; then
+            corepack enable
+            yarn add --dev ${MISSING_PACKAGES}
+          elif [ "${PACKAGE_MANAGER}" = "pnpm" ]; then
+            corepack enable
+            pnpm add --save-dev ${MISSING_PACKAGES}
+          else
+            npm install --save-dev --no-package-lock ${MISSING_PACKAGES}
+          fi
+
+      - name: Ensure Android Native Project
+        if: ${{ steps.detect.outputs.stack == 'react-native' }}
+        run: |
+          if [ ! -d "android" ]; then
+            CI=1 npx expo prebuild --platform android
+          fi
+
+      - name: Normalize React Native New Architecture API
+        if: ${{ steps.detect.outputs.stack == 'react-native' }}
+        run: |
+          MAIN_APP_FILES=()
+          while IFS= read -r -d '' f; do
+            MAIN_APP_FILES+=("$f")
+          done < <(find . -type f -path '*/android/app/src/main/java/*/MainApplication.java' -print0)
+
+          if [ "${#MAIN_APP_FILES[@]}" -eq 0 ]; then
+            echo "â„¹ï¸ No MainApplication.java files found to normalize."
+            exit 0
+          fi
+
+          for MAIN_APP in "${MAIN_APP_FILES[@]}"; do
+            if grep -q 'DefaultNewArchitectureEntryPoint\.releaseLevel' "${MAIN_APP}"; then
+              perl -0pi -e 's/DefaultNewArchitectureEntryPoint\.releaseLevel\s*=\s*([^;]+);/DefaultNewArchitectureEntryPoint.setReleaseLevel($1);/g' "${MAIN_APP}"
+              echo "âœ… Normalized releaseLevel API usage in ${MAIN_APP}"
+            else
+              echo "â„¹ï¸ ${MAIN_APP} already uses compatible release level API."
+            fi
+          done
+
+      - name: Force React Native debug JS bundling for CI
+        if: ${{ steps.detect.outputs.stack == 'react-native' }}
+        run: |
+          BUILD_GRADLE="android/app/build.gradle"
+
+          if [ ! -f "${BUILD_GRADLE}" ]; then
+            echo "â„¹ï¸ No ${BUILD_GRADLE} file found to patch."
+            exit 0
+          fi
+
+          if grep -Fq 'debuggableVariants = []' "${BUILD_GRADLE}"; then
+            echo "â„¹ï¸ Debug JS bundling is already forced in ${BUILD_GRADLE}."
+            exit 0
+          fi
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          build_gradle_path = Path("android/app/build.gradle")
+          content = build_gradle_path.read_text(encoding="utf-8")
+          needle = "react {\n"
+          replacement = (
+              "react {\n"
+              "    // Force JS bundling in debug builds for CI mobile E2E runs.\n"
+              "    debuggableVariants = []\n"
+          )
+
+          if needle not in content:
+              raise SystemExit(f"âŒ Unable to find a react {{ block in {build_gradle_path}.")
+
+          build_gradle_path.write_text(content.replace(needle, replacement, 1), encoding="utf-8")
+          print(f"âœ… Forced debug JS bundling in {build_gradle_path}.")
+          PY
+
+      - name: Resolve Gradle Wrapper Directory
+        id: gradle
+        run: |
+          if [ -f "./gradlew" ]; then
+            GRADLE_DIR="."
+          elif [ -f "android/gradlew" ]; then
+            GRADLE_DIR="android"
+          else
+            WRAPPER_PATH=$(find . -maxdepth 4 -type f -name gradlew | head -n 1)
+            if [ -z "${WRAPPER_PATH}" ]; then
+              echo "âŒ Could not find gradlew in project."
+              exit 1
+            fi
+            GRADLE_DIR=$(dirname "${WRAPPER_PATH}")
+            GRADLE_DIR="${GRADLE_DIR#./}"
+          fi
+
+          echo "gradle_dir=${GRADLE_DIR}" >> "$GITHUB_OUTPUT"
+          echo "âœ… Using gradle wrapper directory: ${GRADLE_DIR}"
+
+      - name: Ensure Kotlin Version Fallback
+        run: |
+          if [ -f "${{ steps.gradle.outputs.gradle_dir }}/gradle.properties" ]; then
+            TARGET_PROPS="${{ steps.gradle.outputs.gradle_dir }}/gradle.properties"
+            if grep -q '^kotlinVersion=' "${TARGET_PROPS}"; then
+              CURRENT_VERSION=$(grep '^kotlinVersion=' "${TARGET_PROPS}" | head -n 1 | cut -d'=' -f2-)
+              echo "â„¹ï¸ Preserving project kotlinVersion=${CURRENT_VERSION}"
+            else
+              echo 'kotlinVersion=2.0.21' >> "${TARGET_PROPS}"
+              echo "âœ… Added fallback kotlinVersion=2.0.21"
+            fi
+          fi
+
+      - name: Setup JDK ${{ inputs.java-version }}
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: ${{ inputs.java-version }}
+
+      - name: Setup Gradle Cache
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Run Android Build
+        env:
+          CUSTOM_ANDROID_BUILD_COMMAND: ${{ inputs.android-build-command }}
+        run: |
+          cd "${{ steps.gradle.outputs.gradle_dir }}"
+          chmod +x gradlew
+
+          if [ -n "${CUSTOM_ANDROID_BUILD_COMMAND}" ]; then
+            echo "â„¹ï¸ Running custom Android build command."
+            bash -c "${CUSTOM_ANDROID_BUILD_COMMAND}"
+            exit 0
+          fi
+
+          ./gradlew ${{ inputs.gradle-task }} --no-daemon --stacktrace --warning-mode all
+
+      - name: Stage Android Artifact (flat)
+        if: ${{ inputs.upload-artifact }}
+        id: stage-android
+        run: |
+          OUTPUT_DIR="ci-artifacts/android"
+          mkdir -p "${OUTPUT_DIR}"
+
+          SEARCH_ROOT="${{ steps.gradle.outputs.gradle_dir }}/app/build/outputs"
+          APK_PATH=$(find "${SEARCH_ROOT}" -type f -name "*.apk" ! -name "*-androidTest.apk" -printf '%s\t%p\n' 2>/dev/null | sort -nr | head -n 1 | cut -f2-)
+          AAB_PATH=$(find "${SEARCH_ROOT}" -type f -name "*.aab" -printf '%s\t%p\n' 2>/dev/null | sort -nr | head -n 1 | cut -f2-)
+
+          if [ -z "${APK_PATH}" ] && [ -z "${AAB_PATH}" ]; then
+            echo "âŒ No APK/AAB outputs found under ${SEARCH_ROOT}."
+            exit 1
+          fi
+
+          if [ -n "${APK_PATH}" ]; then
+            cp "${APK_PATH}" "${OUTPUT_DIR}/${{ inputs.system-name }}-android.apk"
+            echo "âœ… Staged APK: ${APK_PATH}"
+          fi
+
+          if [ -n "${AAB_PATH}" ]; then
+            cp "${AAB_PATH}" "${OUTPUT_DIR}/${{ inputs.system-name }}-android.aab"
+            echo "âœ… Staged AAB: ${AAB_PATH}"
+          fi
+
+      - name: Upload Android Artifact
+        if: ${{ inputs.upload-artifact }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.system-name }}-android-build
+          path: |
+            ${{ inputs.working-directory }}/ci-artifacts/android/*.apk
+            ${{ inputs.working-directory }}/ci-artifacts/android/*.aab
+          if-no-files-found: error
+          retention-days: 14
+
+  docker-build:
+    name: "Docker Build"
+    needs: [gradle-build]
+    if: ${{ inputs.enable-docker-build && inputs.docker-image-name != '' }}
+    
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+      
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      working-directory: ${{ inputs.working-directory }}
+      image-name: ${{ inputs.docker-image-name }}
+      dockerfile-path: ${{ inputs.dockerfile-path }}
+      push-image: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+      scan-vulnerabilities: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+      fail-on-vulnerabilities: false
+
+

@@ -1,0 +1,162 @@
+﻿# Contract: docs/workflows/mobile-tests.md
+# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+# â•‘  REUSABLE: Mobile Unit Tests (Jest)                            â•‘
+# â•‘  Called by any tribe's mobile pipeline                         â•‘
+# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+name: "Reusable: Mobile Unit Tests"
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        required: false
+        type: string
+        default: "."
+        description: "Project directory (e.g. BayaniHub-Mobile, or '.' for root)"
+      system-name:
+        required: true
+        type: string
+        description: "System name for artifacts/display (e.g. BayaniHub-Mobile)"
+      node-version:
+        required: false
+        type: number
+        default: 24
+        description: "Node.js version"
+      test-command:
+        required: false
+        type: string
+        default: "npx jest --coverage --verbose --ci --forceExit"
+        description: "Test command to execute"
+      coverage-threshold:
+        required: false
+        type: number
+        default: 80
+        description: "Minimum coverage percentage"
+      upload-artifact:
+        required: false
+        type: boolean
+        default: true
+        description: "Upload coverage artifact"
+    outputs:
+      test-result:
+        description: "Test pass/fail"
+        value: ${{ jobs.mobile-unit-tests.outputs.result }}
+      coverage-percent:
+        description: "Code coverage percentage"
+        value: ${{ jobs.mobile-unit-tests.outputs.coverage }}
+
+
+permissions:
+  contents: read
+
+jobs:
+  # â”€â”€ Unit Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  mobile-unit-tests:
+    name: "Jest Unit Tests (Mobile)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      result: ${{ steps.test-run.outcome }}
+      coverage: ${{ steps.coverage-check.outputs.coverage }}
+    defaults:
+      run:
+        working-directory: ./${{ inputs.working-directory }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Detect package manager
+        id: detect-pm
+        run: |
+          if [ -f "yarn.lock" ]; then
+            echo "pm=yarn" >> "$GITHUB_OUTPUT"
+          elif [ -f "pnpm-lock.yaml" ]; then
+            echo "pm=pnpm" >> "$GITHUB_OUTPUT"
+          elif [ -f "package-lock.json" ] || [ -f "npm-shrinkwrap.json" ] || [ -f "package.json" ]; then
+            echo "pm=npm" >> "$GITHUB_OUTPUT"
+          else
+            echo "âŒ package.json is required for Expo tests."
+            exit 1
+          fi
+
+      - name: Setup Node.js ${{ inputs.node-version }} (npm)
+        if: ${{ steps.detect-pm.outputs.pm == 'npm' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+          cache-dependency-path: |
+            **/package-lock.json
+
+      - name: Setup Node.js ${{ inputs.node-version }} (yarn)
+        if: ${{ steps.detect-pm.outputs.pm == 'yarn' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "yarn"
+          cache-dependency-path: |
+            **/yarn.lock
+
+      - name: Setup Node.js ${{ inputs.node-version }} (pnpm)
+        if: ${{ steps.detect-pm.outputs.pm == 'pnpm' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "pnpm"
+          cache-dependency-path: |
+            **/pnpm-lock.yaml
+
+      - name: Install Dependencies
+        env:
+          PACKAGE_MANAGER: ${{ steps.detect-pm.outputs.pm }}
+        run: |
+          if [ "${PACKAGE_MANAGER}" = "yarn" ]; then
+            corepack enable
+            yarn install --frozen-lockfile --ignore-scripts
+          elif [ "${PACKAGE_MANAGER}" = "pnpm" ]; then
+            corepack enable
+            pnpm install --frozen-lockfile --ignore-scripts
+          else
+            npm ci --ignore-scripts
+          fi
+
+      - name: Run Jest Unit Tests
+        id: test-run
+        run: ${{ inputs.test-command }}
+        env:
+          NODE_ENV: test
+
+      - name: Parse Coverage
+        id: coverage-check
+        if: always()
+        run: |
+          if [ -f "coverage/coverage-summary.json" ]; then
+            COVERAGE=$(node -e "
+              const data = require('./coverage/coverage-summary.json');
+              console.log(data.total.lines.pct);
+            ")
+            echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
+            echo "ðŸ“Š Line Coverage: ${COVERAGE}%"
+
+            THRESHOLD=${{ inputs.coverage-threshold }}
+            if (( $(echo "$COVERAGE < $THRESHOLD" | bc -l) )); then
+              echo "âŒ Coverage ${COVERAGE}% is below threshold ${THRESHOLD}%"
+              exit 1
+            else
+              echo "âœ… Coverage ${COVERAGE}% meets threshold ${THRESHOLD}%"
+            fi
+          else
+            echo "coverage=unknown" >> $GITHUB_OUTPUT
+            echo "âš ï¸ Coverage summary not found"
+          fi
+
+      - name: Upload Coverage Artifact
+        if: ${{ inputs.upload-artifact && always() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.system-name }}-coverage
+          path: ${{ inputs.working-directory }}/coverage
+          retention-days: 14
+
+
+

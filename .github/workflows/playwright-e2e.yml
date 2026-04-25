@@ -1,0 +1,241 @@
+﻿# Contract: docs/workflows/playwright-e2e.md
+# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+# â•‘  REUSABLE: Playwright E2E Tests                                â•‘
+# â•‘  Runs Playwright-based browser tests for web systems           â•‘
+# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+name: "Reusable: Playwright E2E"
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        required: false
+        type: string
+        default: "."
+        description: "Project directory (e.g. systems/system-a, or '.' for root)"
+      system-name:
+        required: true
+        type: string
+        description: "System name for display/artifacts"
+      node-version:
+        required: false
+        type: number
+        default: 24
+        description: "Node.js version"
+      install-command:
+        required: false
+        type: string
+        default: "npm ci"
+        description: "Dependency installation command"
+      test-command:
+        required: false
+        type: string
+        default: "npm run test:e2e"
+        description: "Playwright E2E command"
+      e2e-tests-directory:
+        required: false
+        type: string
+        default: "tests/e2e"
+        description: "Folder that contains E2E tests"
+      e2e-base-url:
+        required: false
+        type: string
+        default: ""
+        description: "Optional base URL for E2E (e.g. deployed URL)"
+      upload-artifacts:
+        required: false
+        type: boolean
+        default: true
+        description: "Upload test artifacts/logs"
+      run-only-on-branch:
+        required: false
+        type: string
+        default: "test"
+        description: "Branch name allowed to run Playwright (default: test)"
+      browser-list:
+        required: false
+        type: string
+        default: '["chromium"]'
+        description: "Browser list as JSON array or CSV (e.g. [\"chromium\",\"firefox\"] or chromium,firefox)"
+      parallel-mode:
+        required: false
+        type: string
+        default: "matrix"
+        description: "Execution mode: matrix or serial"
+      max-parallel:
+        required: false
+        type: number
+        default: 3
+        description: "Max parallel browser jobs when parallel-mode=matrix"
+      fail-fast:
+        required: false
+        type: boolean
+        default: false
+        description: "Stop remaining browser jobs when one browser fails"
+    outputs:
+      e2e-result:
+        description: "E2E test pass/fail result"
+        value: ${{ jobs.finalize.outputs.result }}
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: "Prepare Playwright Browser Matrix"
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.resolve.outputs.should_run }}
+      browsers_json: ${{ steps.resolve.outputs.browsers_json }}
+    steps:
+      - name: Resolve execution settings
+        id: resolve
+        env:
+          BRANCH_RULE: ${{ inputs.run-only-on-branch }}
+          BROWSER_LIST_INPUT: ${{ inputs.browser-list }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          SHOULD_RUN="false"
+          BRANCH_NAME="${REF_NAME}"
+
+          if [ "${EVENT_NAME}" = "pull_request" ] && [ -n "${BASE_REF}" ]; then
+            BRANCH_NAME="${BASE_REF}"
+          fi
+
+          if [ -z "${BRANCH_RULE}" ] || [ "${BRANCH_RULE}" = "*" ]; then
+            SHOULD_RUN="true"
+          else
+            IFS=',' read -r -a BRANCH_RULES <<< "${BRANCH_RULE}"
+            for RULE in "${BRANCH_RULES[@]}"; do
+              CLEAN_RULE=$(echo "${RULE}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+              if [ -n "${CLEAN_RULE}" ] && [ "${BRANCH_NAME}" = "${CLEAN_RULE}" ]; then
+                SHOULD_RUN="true"
+                break
+              fi
+            done
+          fi
+
+          RAW="${BROWSER_LIST_INPUT}"
+          if [ -z "${RAW}" ]; then
+            RAW='["chromium"]'
+          fi
+
+          if echo "${RAW}" | jq -e . >/dev/null 2>&1; then
+            BROWSERS_JSON=$(echo "${RAW}" | jq -c 'if type=="array" then map(tostring|ascii_downcase|gsub("^\\s+|\\s+$";"")) | map(select(length>0)) else [tostring|ascii_downcase] end')
+          else
+            BROWSERS_JSON=$(printf "%s" "${RAW}" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | sed '/^$/d' | jq -R -s -c 'split("\n") | map(ascii_downcase) | map(select(length>0))')
+          fi
+
+          if [ "$(echo "${BROWSERS_JSON}" | jq 'length')" -eq 0 ]; then
+            BROWSERS_JSON='["chromium"]'
+          fi
+
+          BROWSERS_JSON=$(echo "${BROWSERS_JSON}" | jq -c 'map(select(. == "chromium" or . == "firefox" or . == "webkit"))')
+          if [ "$(echo "${BROWSERS_JSON}" | jq 'length')" -eq 0 ]; then
+            BROWSERS_JSON='["chromium"]'
+          fi
+
+          echo "should_run=${SHOULD_RUN}" >> "$GITHUB_OUTPUT"
+          echo "browsers_json=${BROWSERS_JSON}" >> "$GITHUB_OUTPUT"
+
+  playwright-e2e:
+    name: "Playwright E2E â€” ${{ inputs.system-name }}"
+    needs: [prepare]
+    if: ${{ needs.prepare.outputs.should_run == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: ${{ inputs.fail-fast }}
+      max-parallel: ${{ inputs.max-parallel }}
+      matrix:
+        browser: ${{ fromJson(needs.prepare.outputs.browsers_json) }}
+    defaults:
+      run:
+        working-directory: ./${{ inputs.working-directory }}
+    outputs:
+      result: ${{ steps.run-e2e.outcome }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+          cache-dependency-path: |
+            **/package-lock.json
+
+      - name: Install Dependencies
+        run: ${{ inputs.install-command }}
+
+      - name: Validate E2E tests folder exists
+        env:
+          E2E_TESTS_DIRECTORY: ${{ inputs.e2e-tests-directory }}
+        run: |
+          if [ ! -d "${E2E_TESTS_DIRECTORY}" ]; then
+            echo "âŒ E2E tests folder not found: ${E2E_TESTS_DIRECTORY}"
+            echo "Expected E2E tests under ${E2E_TESTS_DIRECTORY}."
+            exit 1
+          fi
+          echo "âœ… E2E tests folder found: ${E2E_TESTS_DIRECTORY}"
+
+      - name: Install Playwright browsers
+        run: |
+          npx playwright install --with-deps chromium firefox webkit
+
+      - name: Run Playwright E2E
+        id: run-e2e
+        env:
+          PLAYWRIGHT_BROWSER: ${{ matrix.browser }}
+          PLAYWRIGHT_PARALLEL_MODE: ${{ inputs.parallel-mode }}
+          E2E_BASE_URL: ${{ inputs.e2e-base-url }}
+          E2E_TEST_CMD: ${{ inputs.test-command }}
+          E2E_BROWSER: ${{ matrix.browser }}
+        run: |
+          # Substitute {browser} placeholder using env var â€” avoids eval on raw input
+          CMD="${E2E_TEST_CMD//\{browser\}/${E2E_BROWSER}}"
+          echo "Running browser: ${E2E_BROWSER}"
+          echo "Using Playwright local browser execution"
+          bash -c "${CMD}"
+
+      - name: Upload E2E Artifacts
+        if: ${{ inputs.upload-artifacts && always() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.system-name }}-playwright-e2e-${{ matrix.browser }}-artifacts
+          path: |
+            ${{ inputs.working-directory }}/${{ inputs.e2e-tests-directory }}/**
+            ${{ inputs.working-directory }}/test-results/**
+            ${{ inputs.working-directory }}/playwright-report/**
+          if-no-files-found: ignore
+          retention-days: 7
+
+  finalize:
+    name: "Finalize Playwright Result"
+    needs: [prepare, playwright-e2e]
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ steps.finalize.outputs.result }}
+    steps:
+      - name: Resolve final e2e result
+        id: finalize
+        env:
+          SHOULD_RUN: ${{ needs.prepare.outputs.should_run }}
+          MATRIX_RESULT: ${{ needs.playwright-e2e.result }}
+        run: |
+          if [ "${SHOULD_RUN}" != "true" ]; then
+            RESULT="skipped"
+          elif [ "${MATRIX_RESULT}" = "success" ]; then
+            RESULT="success"
+          elif [ "${MATRIX_RESULT}" = "cancelled" ]; then
+            RESULT="cancelled"
+          else
+            RESULT="failure"
+          fi
+          echo "result=${RESULT}" >> "$GITHUB_OUTPUT"
+
+

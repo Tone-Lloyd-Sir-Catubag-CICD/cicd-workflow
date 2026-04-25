@@ -1,0 +1,99 @@
+﻿# Contract: docs/workflows/kotlin-governance-check.md
+name: "Reusable: Kotlin Governance Checks"
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        required: false
+        type: string
+        default: "."
+        description: "Project directory for Kotlin/Android project"
+      system-name:
+        required: true
+        type: string
+        description: "System name for display/artifacts"
+      java-version:
+        required: false
+        type: string
+        default: "17"
+        description: "JDK version"
+      governance-task:
+        required: false
+        type: string
+        default: "check"
+        description: "Gradle governance task (ex: check, lint test detekt)"
+      run-governance:
+        required: false
+        type: boolean
+        default: true
+        description: "Enable/disable Kotlin governance execution"
+      upload-artifact:
+        required: false
+        type: boolean
+        default: true
+        description: "Upload governance test/lint reports"
+
+permissions:
+  contents: read
+
+jobs:
+  kotlin-governance:
+    name: "Kotlin Governance"
+    if: ${{ inputs.run-governance }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ./${{ inputs.working-directory }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Resolve Gradle Wrapper Directory
+        id: gradle
+        run: |
+          if [ -f "./gradlew" ]; then
+            GRADLE_DIR="."
+          elif [ -f "android/gradlew" ]; then
+            GRADLE_DIR="android"
+          else
+            WRAPPER_PATH=$(find . -maxdepth 4 -type f -name gradlew | head -n 1)
+            if [ -z "${WRAPPER_PATH}" ]; then
+              echo "âŒ Could not find gradlew in project."
+              exit 1
+            fi
+            GRADLE_DIR=$(dirname "${WRAPPER_PATH}")
+            GRADLE_DIR="${GRADLE_DIR#./}"
+          fi
+
+          echo "gradle_dir=${GRADLE_DIR}" >> "$GITHUB_OUTPUT"
+          echo "âœ… Using gradle wrapper directory: ${GRADLE_DIR}"
+
+      - name: Setup JDK ${{ inputs.java-version }}
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: ${{ inputs.java-version }}
+
+      - name: Setup Gradle Cache
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Run Kotlin Governance Task
+        run: |
+          cd "${{ steps.gradle.outputs.gradle_dir }}"
+          chmod +x gradlew
+          ./gradlew ${{ inputs.governance-task }} --no-daemon --stacktrace --warning-mode all
+
+      - name: Upload Governance Reports
+        if: ${{ inputs.upload-artifact && always() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.system-name }}-kotlin-governance
+          path: |
+            ${{ inputs.working-directory }}/**/build/reports/**
+            ${{ inputs.working-directory }}/**/build/test-results/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+

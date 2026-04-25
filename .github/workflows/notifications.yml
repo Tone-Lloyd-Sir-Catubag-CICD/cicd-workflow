@@ -1,0 +1,469 @@
+﻿# Contract: docs/workflows/notifications.md
+# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+# â•‘  REUSABLE: Pipeline Notifications                              â•‘
+# â•‘  Sends failure/success alerts to configured channels          â•‘
+# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+name: "Reusable: Pipeline Notifications"
+
+on:
+  workflow_call:
+    inputs:
+      status:
+        required: true
+        type: string
+        description: "Pipeline status (success|failure|cancelled)"
+      system-dir:
+        required: true
+        type: string
+        description: "System name or comma-separated system names"
+      pipeline-type:
+        required: false
+        type: string
+        default: "CI/CD"
+        description: "Pipeline type (CI/CD, Staging, Production)"
+      error-details:
+        required: false
+        type: string
+        default: ""
+        description: "Error details for failure notifications"
+      deployment-url:
+        required: false
+        type: string
+        default: ""
+        description: "Deployment URL to include when available"
+      deployment-urls-json:
+        required: false
+        type: string
+        default: "{}"
+        description: "Deployment URLs by system as JSON object"
+      artifact-kind:
+        required: false
+        type: string
+        default: "deployment"
+        description: "Artifact kind shown in notifications (deployment or release)"
+      release-url:
+        required: false
+        type: string
+        default: ""
+        description: "Release URL to include when available"
+      release-urls-json:
+        required: false
+        type: string
+        default: "{}"
+        description: "Release URLs by system as JSON object"
+      success-image-url:
+        required: false
+        type: string
+        default: ""
+        description: "Discord image URL shown when status=success"
+      failure-image-url:
+        required: false
+        type: string
+        default: ""
+        description: "Discord image URL shown when status=failure"
+      cancelled-image-url:
+        required: false
+        type: string
+        default: ""
+        description: "Discord image URL shown when status=cancelled"
+      tests-status:
+        required: false
+        type: string
+        default: ""
+        description: "Tests job result (success|failure|cancelled|skipped)"
+      lint-status:
+        required: false
+        type: string
+        default: ""
+        description: "Lint job result"
+      security-status:
+        required: false
+        type: string
+        default: ""
+        description: "Security job result"
+      sonar-status:
+        required: false
+        type: string
+        default: ""
+        description: "SonarCloud job result"
+      playwright-status:
+        required: false
+        type: string
+        default: ""
+        description: "Playwright E2E job result"
+      grafana-status:
+        required: false
+        type: string
+        default: ""
+        description: "Grafana k6 job result"
+      enforce-gate-status:
+        required: false
+        type: string
+        default: ""
+        description: "Enforcement gate job result"
+      versions-json:
+        required: false
+        type: string
+        default: "{}"
+        description: "Version tags JSON object {system: tag}"
+      quality-gates-json:
+        required: false
+        type: string
+        default: "{}"
+        description: "Optional quality gates JSON object {label: result}"
+      pipeline-result:
+        required: false
+        type: string
+        default: ""
+        description: "Overall pipeline result"
+    secrets:
+      SLACK_WEBHOOK_URL:
+        required: false
+      DISCORD_WEBHOOK_URL:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    name: "Send Notification"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HAS_SLACK: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
+      HAS_DISCORD: ${{ secrets.DISCORD_WEBHOOK_URL != '' }}
+    steps:
+      - name: Prepare Notification
+        id: prepare
+        env:
+          STATUS: ${{ inputs.status }}
+          SYSTEM_DIR: ${{ inputs['system-dir'] }}
+          PIPELINE_TYPE: ${{ inputs['pipeline-type'] }}
+          BRANCH_NAME: ${{ github.ref_name }}
+          ACTOR_NAME: ${{ github.actor }}
+          COMMIT_SHA: ${{ github.sha }}
+          SHORT_SHA: ${{ github.sha }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMPARE_DEFAULT: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+          SUCCESS_IMAGE_URL: ${{ inputs['success-image-url'] }}
+          FAILURE_IMAGE_URL: ${{ inputs['failure-image-url'] }}
+          CANCELLED_IMAGE_URL: ${{ inputs['cancelled-image-url'] }}
+        run: |
+          SHORT_SHA="${COMMIT_SHA:0:7}"
+
+          if [ "${EVENT_NAME}" = "push" ] && [ -n "${BEFORE_SHA}" ] && [ "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]; then
+            COMPARE_URL="${{ github.server_url }}/${{ github.repository }}/compare/${BEFORE_SHA}...${COMMIT_SHA}"
+          else
+            COMPARE_URL="${COMPARE_DEFAULT}"
+          fi
+
+          case "${BRANCH_NAME}" in
+            main)
+              ENV_LABEL="Production"
+              ENV_EMOJI="ðŸ"
+              ENV_COLOR="15548997"
+              ;;
+            uat)
+              ENV_LABEL="UAT"
+              ENV_EMOJI="ðŸ§ª"
+              ENV_COLOR="15844367"
+              ;;
+            test)
+              ENV_LABEL="Test"
+              ENV_EMOJI="ðŸ”¬"
+              ENV_COLOR="5793266"
+              ;;
+            *)
+              ENV_LABEL="${BRANCH_NAME}"
+              ENV_EMOJI="ðŸŒ¿"
+              ENV_COLOR="10181046"
+              ;;
+          esac
+
+          if [ "${STATUS}" = "success" ]; then
+            EMOJI="âœ…"
+            COLOR="good"
+            TITLE="Pipeline Succeeded"
+          elif [ "${STATUS}" = "failure" ]; then
+            EMOJI="âŒ"
+            COLOR="danger"
+            TITLE="Pipeline Failed"
+          else
+            EMOJI="âš ï¸"
+            COLOR="warning"
+            TITLE="Pipeline Cancelled"
+          fi
+
+          if [ "${STATUS}" = "failure" ] && { [ "${BRANCH_NAME}" = "main" ] || [ "${BRANCH_NAME}" = "uat" ]; }; then
+            MENTION="<!here>"
+          else
+            MENTION=""
+          fi
+
+          echo "emoji=$EMOJI" >> $GITHUB_OUTPUT
+          echo "color=$COLOR" >> $GITHUB_OUTPUT
+          echo "env_color=$ENV_COLOR" >> $GITHUB_OUTPUT
+          echo "env_label=$ENV_LABEL" >> $GITHUB_OUTPUT
+          echo "env_emoji=$ENV_EMOJI" >> $GITHUB_OUTPUT
+          echo "title=$TITLE" >> $GITHUB_OUTPUT
+          echo "mention=$MENTION" >> $GITHUB_OUTPUT
+          echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+          echo "workflow_name=$WORKFLOW_NAME" >> $GITHUB_OUTPUT
+          echo "run_attempt=$RUN_ATTEMPT" >> $GITHUB_OUTPUT
+          echo "compare_url=$COMPARE_URL" >> $GITHUB_OUTPUT
+
+          IMAGE_URL=""
+          if [ "${STATUS}" = "success" ]; then
+            IMAGE_URL="${SUCCESS_IMAGE_URL}"
+          elif [ "${STATUS}" = "failure" ]; then
+            IMAGE_URL="${FAILURE_IMAGE_URL}"
+          else
+            IMAGE_URL="${CANCELLED_IMAGE_URL}"
+          fi
+
+          DRIVE_ID=""
+          if echo "${IMAGE_URL}" | grep -Eq '^https://drive\.google\.com/file/d/[^/]+/view'; then
+            DRIVE_ID=$(echo "${IMAGE_URL}" | sed -E 's#^https://drive\.google\.com/file/d/([^/]+)/view.*#\1#')
+          elif echo "${IMAGE_URL}" | grep -Eq '^https://drive\.google\.com/open\?id='; then
+            DRIVE_ID=$(echo "${IMAGE_URL}" | sed -E 's#^https://drive\.google\.com/open\?id=([^&]+).*$#\1#')
+          elif echo "${IMAGE_URL}" | grep -Eq '^https://drive\.google\.com/uc\?id='; then
+            DRIVE_ID=$(echo "${IMAGE_URL}" | sed -E 's#^https://drive\.google\.com/uc\?id=([^&]+).*$#\1#')
+          fi
+
+          if [ -n "${DRIVE_ID}" ]; then
+            IMAGE_URL="https://drive.google.com/uc?export=view&id=${DRIVE_ID}"
+          fi
+
+          echo "image_url=${IMAGE_URL}" >> $GITHUB_OUTPUT
+
+          echo "$EMOJI $TITLE"
+          echo "  Systems:  ${SYSTEM_DIR}"
+          echo "  Pipeline: ${PIPELINE_TYPE}"
+          echo "  Branch:   ${BRANCH_NAME}"
+          echo "  Commit:   ${COMMIT_SHA}"
+          echo "  Actor:    ${ACTOR_NAME}"
+          echo "  Run URL:  ${RUN_URL}"
+
+      - name: Notify Slack
+        if: env.HAS_SLACK == 'true'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          retry() {
+            local attempts=$1
+            local delay=$2
+            shift 2
+            local count=1
+            until "$@"; do
+              if [ "$count" -ge "$attempts" ]; then
+                return 1
+              fi
+              sleep "$delay"
+              count=$((count + 1))
+            done
+          }
+
+          retry 3 3 curl -sS -X POST "$SLACK_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg mention '${{ steps.prepare.outputs.mention }}' \
+              --arg color '${{ steps.prepare.outputs.color }}' \
+              --arg title '${{ steps.prepare.outputs.emoji }} ${{ steps.prepare.outputs.title }}' \
+              --arg systems '${{ inputs['system-dir'] }}' \
+              --arg pipeline '${{ inputs['pipeline-type'] }}' \
+              --arg branch '${{ github.ref_name }}' \
+              --arg actor '${{ github.actor }}' \
+              --arg workflow '${{ steps.prepare.outputs.workflow_name }}' \
+              --arg attempt '${{ steps.prepare.outputs.run_attempt }}' \
+              --arg shortSha '${{ steps.prepare.outputs.short_sha }}' \
+              --arg compareUrl '${{ steps.prepare.outputs.compare_url }}' \
+              --arg runUrl '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}' \
+              --arg envLabel '${{ steps.prepare.outputs.env_emoji }} ${{ steps.prepare.outputs.env_label }}' \
+              --arg deploymentUrl '${{ inputs['deployment-url'] }}' \
+              --arg deploymentUrlsJson '${{ inputs['deployment-urls-json'] }}' \
+              --arg artifactKind '${{ inputs['artifact-kind'] }}' \
+              --arg releaseUrl '${{ inputs['release-url'] }}' \
+              --arg releaseUrlsJson '${{ inputs['release-urls-json'] }}' \
+              --arg details '${{ inputs['error-details'] }}' \
+              --arg qualityGatesJson '${{ inputs['quality-gates-json'] }}' \
+              '((try ($deploymentUrlsJson | fromjson) catch {}) | to_entries | map(select((.key | length) > 0 and ((.value | tostring) | length) > 0))) as $deploymentEntries |
+              ($artifactKind | ascii_downcase) as $kind |
+              (if $kind == "release" then "Release" else "Deployment" end) as $artifactTitle |
+              (if $kind == "release" then "Releases" else "Deployments" end) as $artifactTitlePlural |
+              (if $kind == "release" and ($releaseUrlsJson | length) > 0 then $releaseUrlsJson else $deploymentUrlsJson end) as $artifactJson |
+              (if $kind == "release" and ($releaseUrl | length) > 0 then $releaseUrl else $deploymentUrl end) as $artifactUrl |
+              ((try ($artifactJson | fromjson) catch {}) | to_entries | map(select((.key | length) > 0 and ((.value | tostring) | length) > 0))) as $artifactEntries |
+              ($artifactEntries | map("â€¢ " + .key + ": " + (.value | tostring)) | join("\n")) as $artifactLines |
+              ($artifactEntries | length) as $artifactCount |
+              ($artifactEntries[0].value // "" | tostring) as $firstArtifactUrl |
+              {
+                text: $mention,
+                attachments: [
+                  {
+                    color: $color,
+                    title: $title,
+                    fields: (
+                      [
+                        {title:"Systems", value:$systems, short:false},
+                        {title:"Pipeline", value:$pipeline, short:true},
+                        {title:"Environment", value:$envLabel, short:true},
+                        {title:"Branch", value:$branch, short:true},
+                        {title:"Workflow", value:$workflow, short:true},
+                        {title:"Run Attempt", value:$attempt, short:true},
+                        {title:"Short SHA", value:$shortSha, short:true},
+                        {title:"Actor", value:$actor, short:true},
+                        {title:"Compare", value:$compareUrl, short:false},
+                        {title:"Run", value:$runUrl, short:false}
+                      ]
+                      + (if ($artifactUrl | length) > 0 then [{title:$artifactTitle, value:$artifactUrl, short:false}] else [] end)
+                      + (if ($artifactLines | length) > 0 and ($artifactCount > 1 or ($artifactUrl | length) == 0 or $firstArtifactUrl != $artifactUrl) then [{title:$artifactTitlePlural, value:$artifactLines, short:false}] else [] end)
+                      + (if ($details | length) > 0 then [{title:"Details", value:$details, short:false}] else [] end)
+                    ),
+                    footer: ("<" + $runUrl + "|View Run>")
+                  }
+                ]
+              }')"
+
+      - name: Notify Discord
+        if: env.HAS_DISCORD == 'true'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          retry() {
+            local attempts=$1
+            local delay=$2
+            shift 2
+            local count=1
+            until "$@"; do
+              if [ "$count" -ge "$attempts" ]; then
+                return 1
+              fi
+              sleep "$delay"
+              count=$((count + 1))
+            done
+          }
+
+          TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          retry 3 3 curl -sS -X POST "$DISCORD_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg mention '${{ steps.prepare.outputs.mention }}' \
+              --arg title '${{ steps.prepare.outputs.emoji }} ${{ steps.prepare.outputs.title }}' \
+              --arg systems '${{ inputs['system-dir'] }}' \
+              --arg pipeline '${{ inputs['pipeline-type'] }}' \
+              --arg actor '${{ github.actor }}' \
+              --arg branch '${{ github.ref_name }}' \
+              --arg workflow '${{ steps.prepare.outputs.workflow_name }}' \
+              --arg attempt '${{ steps.prepare.outputs.run_attempt }}' \
+              --arg runNumber '${{ github.run_number }}' \
+              --arg shortSha '${{ steps.prepare.outputs.short_sha }}' \
+              --arg compareUrl '${{ steps.prepare.outputs.compare_url }}' \
+              --arg runUrl '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}' \
+              --arg repoUrl '${{ github.server_url }}/${{ github.repository }}' \
+              --arg commitSha '${{ github.sha }}' \
+              --arg envLabel '${{ steps.prepare.outputs.env_emoji }} ${{ steps.prepare.outputs.env_label }}' \
+              --arg deploymentUrl '${{ inputs['deployment-url'] }}' \
+              --arg deploymentUrlsJson '${{ inputs['deployment-urls-json'] }}' \
+              --arg artifactKind '${{ inputs['artifact-kind'] }}' \
+              --arg releaseUrl '${{ inputs['release-url'] }}' \
+              --arg releaseUrlsJson '${{ inputs['release-urls-json'] }}' \
+              --arg details '${{ inputs['error-details'] }}' \
+              --arg testsStatus '${{ inputs['tests-status'] }}' \
+              --arg lintStatus '${{ inputs['lint-status'] }}' \
+              --arg securityStatus '${{ inputs['security-status'] }}' \
+              --arg sonarStatus '${{ inputs['sonar-status'] }}' \
+              --arg playwrightStatus '${{ inputs['playwright-status'] }}' \
+              --arg grafanaStatus '${{ inputs['grafana-status'] }}' \
+              --arg enforceStatus '${{ inputs['enforce-gate-status'] }}' \
+              --arg versionsJson '${{ inputs['versions-json'] }}' \
+              --arg qualityGatesJson '${{ inputs['quality-gates-json'] }}' \
+              --arg pipelineResult '${{ inputs['pipeline-result'] }}' \
+              --argjson envColor ${{ steps.prepare.outputs.env_color }} \
+              --arg imageUrl '${{ steps.prepare.outputs.image_url }}' \
+              --arg timestamp "${TIMESTAMP}" \
+              'def icon: if . == "success" then "âœ…" elif . == "failure" then "âŒ" elif . == "cancelled" then "âš ï¸" elif . == "skipped" then "â­ï¸" else "â¬œ" end;
+
+              # Build pipeline result line
+              (if ($pipelineResult | length) > 0 then
+                "**Pipeline Result:** " + ($pipelineResult | icon) + " `" + $pipelineResult + "`\n\n"
+              else "" end) as $resultLine |
+
+              ((try ($qualityGatesJson | fromjson) catch {}) | to_entries | map(select((.key | length) > 0 and ((.value | tostring) | length) > 0))) as $qualityGateEntries |
+
+              # Build fallback gates from whichever statuses are actually provided
+              ([
+                {key:"Tests", value:$testsStatus},
+                {key:"Lint", value:$lintStatus},
+                {key:"Security", value:$securityStatus},
+                {key:"SonarCloud", value:$sonarStatus},
+                {key:"Playwright E2E", value:$playwrightStatus},
+                {key:"Grafana k6", value:$grafanaStatus},
+                {key:"Enforcement Gate", value:$enforceStatus}
+              ] | map(select(((.value | tostring) | length) > 0))) as $fallbackGateEntries |
+
+              (if ($qualityGateEntries | length) > 0 then $qualityGateEntries else $fallbackGateEntries end) as $resolvedGateEntries |
+
+              # Build quality gates section
+              (if ($resolvedGateEntries | length) > 0 then
+                "**Quality Gates**\n" +
+                ($resolvedGateEntries | map((.value | icon) + " " + .key + " Â· `" + (.value | tostring) + "`") | join("\n"))
+              else "" end) as $gatesBlock |
+
+              # Assemble description
+              ($resultLine + $gatesBlock +
+                (if ($details | length) > 0 then "\n\nâš ï¸ **Error:** " + $details else "" end)
+              ) as $description |
+
+              # Deployments / releases
+              ($artifactKind | ascii_downcase) as $kind |
+              (if $kind == "release" then "ðŸ“¦ Release" else "ðŸ”— Deployment" end) as $artifactField |
+              (if $kind == "release" then "ðŸ“¦ Releases" else "ðŸ”— Deployments" end) as $artifactFieldPlural |
+              (if $kind == "release" and ($releaseUrlsJson | length) > 0 then $releaseUrlsJson else $deploymentUrlsJson end) as $artifactJson |
+              (if $kind == "release" and ($releaseUrl | length) > 0 then $releaseUrl else $deploymentUrl end) as $artifactUrl |
+              ((try ($artifactJson | fromjson) catch {}) | to_entries | map(select((.key | length) > 0 and ((.value | tostring) | length) > 0))) as $artifactEntries |
+              ($artifactEntries | map("â€¢ **" + .key + "**: " + (.value | tostring)) | join("\n")) as $artifactLines |
+              ($artifactEntries | length) as $artifactCount |
+              ($artifactEntries[0].value // "" | tostring) as $firstArtifactUrl |
+
+              # Versions
+              ((try ($versionsJson | fromjson) catch {}) | to_entries | map(select((.key | length) > 0 and ((.value | tostring) | length) > 0))) as $versionEntries |
+              ($versionEntries | map("â€¢ **" + .key + "**: `" + (.value | tostring) + "`") | join("\n")) as $versionLines |
+
+              {
+                content: $mention,
+                embeds: [
+                  {
+                    title: $title,
+                    color: $envColor,
+                    description: $description,
+                    fields: (
+                      [
+                        {name: "ðŸ“¦ Systems", value: $systems, inline: false},
+                        {name: "Pipeline", value: $pipeline, inline: true},
+                        {name: "Environment", value: $envLabel, inline: true},
+                        {name: "Branch", value: ("`" + $branch + "`"), inline: true},
+                        {name: "Commit", value: ("[`" + $shortSha + "`](" + $repoUrl + "/commit/" + $commitSha + ")"), inline: true},
+                        {name: "Actor", value: $actor, inline: true},
+                        {name: "Run Attempt", value: $attempt, inline: true}
+                      ]
+                      + (if ($versionLines | length) > 0 then [{name: "ðŸ·ï¸ Versions", value: $versionLines, inline: false}] else [] end)
+                      + (if ($artifactUrl | length) > 0 then [{name: $artifactField, value: $artifactUrl, inline: false}] else [] end)
+                      + (if ($artifactLines | length) > 0 and ($artifactCount > 1 or ($artifactUrl | length) == 0 or $firstArtifactUrl != $artifactUrl) then [{name: $artifactFieldPlural, value: $artifactLines, inline: false}] else [] end)
+                      + [{name: "ðŸ”— Links", value: ("[View Run â†—](" + $runUrl + ") Â· [Compare â†—](" + $compareUrl + ")"), inline: false}]
+                    ),
+                    image: (if ($imageUrl | length) > 0 then {url: $imageUrl} else null end),
+                    url: $runUrl,
+                    footer: {text: ($workflow + " Â· Run #" + $runNumber)},
+                    timestamp: $timestamp
+                  }
+                ]
+              }')"
+
+
+

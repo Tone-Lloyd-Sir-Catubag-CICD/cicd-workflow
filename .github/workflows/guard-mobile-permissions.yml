@@ -1,0 +1,72 @@
+﻿# Contract: docs/workflows/guard-mobile-permissions.md
+name: "Guard: Mobile Reusable Permission Contracts"
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/*.yml"
+      - "CLAUDE.md"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/*.yml"
+      - "CLAUDE.md"
+
+permissions:
+  contents: read
+
+jobs:
+  verify-mobile-permission-contract:
+    name: "Verify mobile nested permission contract"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Verify permission scopes for reusable workflow callers
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          assert_block_has_permissions() {
+            local file="$1"
+            local block="$2"
+
+            if [ ! -f "$file" ]; then
+              echo "::error::Missing workflow file: $file"
+              exit 1
+            fi
+
+            local extracted
+            extracted=$(awk -v block="$block" '
+              $0 ~ "^  " block ":" {in_block=1}
+              in_block {
+                if ($0 ~ /^  [a-zA-Z0-9_-]+:/ && $0 !~ "^  " block ":") {
+                  exit
+                }
+                print
+              }
+            ' "$file")
+
+            if [ -z "$extracted" ]; then
+              echo "::error::Could not find job block '"$block"' in $file"
+              exit 1
+            fi
+
+            if ! grep -q "packages: write" <<< "$extracted"; then
+              echo "::error::$file job '$block' must include permissions.packages: write"
+              exit 1
+            fi
+
+            if ! grep -q "security-events: write" <<< "$extracted"; then
+              echo "::error::$file job '$block' must include permissions.security-events: write"
+              exit 1
+            fi
+          }
+
+          assert_block_has_permissions ".github/workflows/mobile-react-native.yml" "android-build"
+          assert_block_has_permissions ".github/workflows/mobile-gradle.yml" "docker-build"
+
+          echo "Permission contract check passed."
+

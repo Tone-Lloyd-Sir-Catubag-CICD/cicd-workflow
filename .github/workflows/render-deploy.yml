@@ -1,0 +1,436 @@
+﻿# Contract: docs/workflows/render-deploy.md
+# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+# â•‘  REUSABLE: Render Deployment                                   â•‘
+# â•‘  Dual mode: deploy hook trigger or health verification         â•‘
+# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+name: "Reusable: Render Deploy"
+
+on:
+  workflow_call:
+    inputs:
+      system-name:
+        required: true
+        type: string
+        description: "System name for display"
+      environment:
+        required: true
+        type: string
+        description: "Deployment environment (test|uat|production)"
+      branch:
+        required: true
+        type: string
+        description: "Branch to deploy (test|uat|main)"
+      deploy-mode:
+        required: false
+        type: string
+        default: "auto"
+        description: "auto|webhook|verify-only"
+      deploy-hook-url:
+        required: false
+        type: string
+        default: ""
+        description: "Optional direct Render deploy hook URL override"
+      healthcheck-url:
+        required: false
+        type: string
+        default: ""
+        description: "Optional direct Render health URL (base or full health endpoint)"
+      healthcheck-path:
+        required: false
+        type: string
+        default: "/api/v1/health"
+        description: "Health path appended when healthcheck-url is a base URL"
+      healthcheck-timeout-seconds:
+        required: false
+        type: number
+        default: 0
+        description: "Timeout for health polling; 0 uses environment defaults"
+      healthcheck-interval-seconds:
+        required: false
+        type: number
+        default: 10
+        description: "Health polling interval"
+      healthcheck-expected-statuses:
+        required: false
+        type: string
+        default: ""
+        description: "Comma-separated accepted HTTP statuses"
+      require-api-center-check:
+        required: false
+        type: boolean
+        default: true
+        description: "Require checks.apiCenter=true in health payload"
+    secrets:
+      RENDER_DEPLOY_HOOK_URL_TEST:
+        required: false
+        description: "Render deploy hook URL for test"
+      RENDER_DEPLOY_HOOK_URL_UAT:
+        required: false
+        description: "Render deploy hook URL for uat"
+      RENDER_DEPLOY_HOOK_URL_MAIN:
+        required: false
+        description: "Render deploy hook URL for main"
+      RENDER_DEPLOY_HOOK_URL:
+        required: false
+        description: "Fallback Render deploy hook URL"
+      RENDER_HEALTHCHECK_URL_TEST:
+        required: false
+        description: "Render health URL for test"
+      RENDER_HEALTHCHECK_URL_UAT:
+        required: false
+        description: "Render health URL for uat"
+      RENDER_HEALTHCHECK_URL_MAIN:
+        required: false
+        description: "Render health URL for main"
+      RENDER_HEALTHCHECK_URL:
+        required: false
+        description: "Fallback Render health URL"
+    outputs:
+      deployment_url:
+        description: "Resolved Render deployment URL"
+        value: ${{ jobs.render-deploy.outputs.deployment_url }}
+      mode_used:
+        description: "Execution mode used by Render lane"
+        value: ${{ jobs.render-deploy.outputs.mode_used }}
+      health_status:
+        description: "Health verification status"
+        value: ${{ jobs.render-deploy.outputs.health_status }}
+      healthcheck_url:
+        description: "Resolved healthcheck URL"
+        value: ${{ jobs.render-deploy.outputs.healthcheck_url }}
+      health_http_code:
+        description: "Final health HTTP code"
+        value: ${{ jobs.render-deploy.outputs.health_http_code }}
+      webhook_http_code:
+        description: "Deploy hook HTTP code when webhook mode runs"
+        value: ${{ jobs.render-deploy.outputs.webhook_http_code }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: render-deploy-${{ inputs.environment }}-${{ inputs.system-name }}
+  cancel-in-progress: false
+
+jobs:
+  render-deploy:
+    name: "Deploy to Render (${{ inputs.environment }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    outputs:
+      deployment_url: ${{ steps.summarize.outputs.deployment_url }}
+      mode_used: ${{ steps.summarize.outputs.mode_used }}
+      health_status: ${{ steps.summarize.outputs.health_status }}
+      healthcheck_url: ${{ steps.summarize.outputs.healthcheck_url }}
+      health_http_code: ${{ steps.summarize.outputs.health_http_code }}
+      webhook_http_code: ${{ steps.summarize.outputs.webhook_http_code }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Resolve Render mode and health defaults
+        id: resolve
+        env:
+          DEPLOY_MODE: ${{ inputs.deploy-mode }}
+          BRANCH: ${{ inputs.branch }}
+          HEALTHCHECK_URL: ${{ inputs.healthcheck-url }}
+          HEALTHCHECK_TIMEOUT_SECONDS: ${{ inputs.healthcheck-timeout-seconds }}
+          HEALTHCHECK_INTERVAL_SECONDS: ${{ inputs.healthcheck-interval-seconds }}
+          HEALTHCHECK_EXPECTED_STATUSES: ${{ inputs.healthcheck-expected-statuses }}
+          DEPLOY_HOOK_URL_INPUT: ${{ inputs.deploy-hook-url }}
+          RENDER_DEPLOY_HOOK_URL_TEST: ${{ secrets.RENDER_DEPLOY_HOOK_URL_TEST }}
+          RENDER_DEPLOY_HOOK_URL_UAT: ${{ secrets.RENDER_DEPLOY_HOOK_URL_UAT }}
+          RENDER_DEPLOY_HOOK_URL_MAIN: ${{ secrets.RENDER_DEPLOY_HOOK_URL_MAIN }}
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+          RENDER_HEALTHCHECK_URL_TEST: ${{ secrets.RENDER_HEALTHCHECK_URL_TEST }}
+          RENDER_HEALTHCHECK_URL_UAT: ${{ secrets.RENDER_HEALTHCHECK_URL_UAT }}
+          RENDER_HEALTHCHECK_URL_MAIN: ${{ secrets.RENDER_HEALTHCHECK_URL_MAIN }}
+          RENDER_HEALTHCHECK_URL: ${{ secrets.RENDER_HEALTHCHECK_URL }}
+        run: |
+          set -euo pipefail
+
+          mode_raw="$(echo "${DEPLOY_MODE}" | tr '[:upper:]' '[:lower:]')"
+          case "${mode_raw}" in
+            auto|webhook|verify-only) ;;
+            *)
+              echo "âŒ Invalid deploy-mode '${DEPLOY_MODE}'. Allowed: auto, webhook, verify-only"
+              exit 1
+              ;;
+          esac
+
+          branch_name="$(echo "${BRANCH}" | tr '[:upper:]' '[:lower:]')"
+          deploy_hook_url="${DEPLOY_HOOK_URL_INPUT}"
+
+          if [ -z "${deploy_hook_url}" ]; then
+            case "${branch_name}" in
+              test)
+                deploy_hook_url="${RENDER_DEPLOY_HOOK_URL_TEST:-${RENDER_DEPLOY_HOOK_URL:-}}"
+                ;;
+              uat)
+                deploy_hook_url="${RENDER_DEPLOY_HOOK_URL_UAT:-${RENDER_DEPLOY_HOOK_URL:-}}"
+                ;;
+              main)
+                deploy_hook_url="${RENDER_DEPLOY_HOOK_URL_MAIN:-${RENDER_DEPLOY_HOOK_URL:-}}"
+                ;;
+              *)
+                deploy_hook_url="${RENDER_DEPLOY_HOOK_URL:-}"
+                ;;
+            esac
+          fi
+
+          mode_used="${mode_raw}"
+          if [ "${mode_used}" = "auto" ]; then
+            if [ -n "${deploy_hook_url}" ]; then
+              mode_used="webhook"
+            else
+              mode_used="verify-only"
+            fi
+          fi
+
+          if [ "${mode_used}" = "webhook" ] && [ -z "${deploy_hook_url}" ]; then
+            echo "âŒ deploy-mode=webhook requires a Render deploy hook URL."
+            exit 1
+          fi
+
+          if [ "${branch_name}" = "test" ]; then
+            default_expected="200,401,403"
+            default_timeout=180
+          elif [ "${branch_name}" = "main" ]; then
+            default_expected="200"
+            default_timeout=600
+          else
+            default_expected="200"
+            default_timeout=420
+          fi
+
+          expected_statuses="${HEALTHCHECK_EXPECTED_STATUSES}"
+          if [ -z "${expected_statuses}" ]; then
+            expected_statuses="${default_expected}"
+          fi
+
+          timeout_seconds="${HEALTHCHECK_TIMEOUT_SECONDS}"
+          if ! [[ "${timeout_seconds}" =~ ^[0-9]+$ ]] || [ "${timeout_seconds}" -le 0 ]; then
+            timeout_seconds=${default_timeout}
+          fi
+
+          interval_seconds="${HEALTHCHECK_INTERVAL_SECONDS}"
+          if ! [[ "${interval_seconds}" =~ ^[0-9]+$ ]] || [ "${interval_seconds}" -le 0 ]; then
+            interval_seconds=10
+          fi
+
+          health_seed_url=""
+          if [ -n "${HEALTHCHECK_URL}" ]; then
+            health_seed_url="${HEALTHCHECK_URL}"
+          else
+            case "${branch_name}" in
+              test)
+                health_seed_url="${RENDER_HEALTHCHECK_URL_TEST:-${RENDER_HEALTHCHECK_URL:-}}"
+                ;;
+              uat)
+                health_seed_url="${RENDER_HEALTHCHECK_URL_UAT:-${RENDER_HEALTHCHECK_URL:-}}"
+                ;;
+              main)
+                health_seed_url="${RENDER_HEALTHCHECK_URL_MAIN:-${RENDER_HEALTHCHECK_URL:-}}"
+                ;;
+              *)
+                health_seed_url="${RENDER_HEALTHCHECK_URL:-}"
+                ;;
+            esac
+          fi
+
+          echo "mode_used=${mode_used}" >> "$GITHUB_OUTPUT"
+          echo "deploy_hook_url=${deploy_hook_url}" >> "$GITHUB_OUTPUT"
+          echo "health_seed_url=${health_seed_url}" >> "$GITHUB_OUTPUT"
+          echo "expected_statuses=${expected_statuses}" >> "$GITHUB_OUTPUT"
+          echo "timeout_seconds=${timeout_seconds}" >> "$GITHUB_OUTPUT"
+          echo "interval_seconds=${interval_seconds}" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger Render deploy hook
+        id: webhook
+        if: ${{ steps.resolve.outputs.mode_used == 'webhook' }}
+        env:
+          DEPLOY_HOOK_URL: ${{ steps.resolve.outputs.deploy_hook_url }}
+        run: |
+          set -euo pipefail
+
+          success=false
+          http_code="000"
+          body=""
+
+          for attempt in 1 2 3; do
+            response=$(curl -sS -w "\n%{http_code}" -X POST "${DEPLOY_HOOK_URL}" 2>&1 || true)
+            http_code=$(echo "${response}" | tail -n 1)
+            body=$(echo "${response}" | sed '$d')
+
+            if [ "${http_code}" = "200" ] || [ "${http_code}" = "201" ] || [ "${http_code}" = "202" ] || [ "${http_code}" = "204" ]; then
+              success=true
+              break
+            fi
+
+            if [ "${attempt}" -lt 3 ]; then
+              echo "âš ï¸ Deploy hook attempt ${attempt} failed with HTTP ${http_code}; retrying..."
+              sleep 5
+            fi
+          done
+
+          if [ "${success}" != "true" ]; then
+            echo "âŒ Render deploy hook failed after retries. HTTP ${http_code}"
+            echo "Response body: ${body}"
+            exit 1
+          fi
+
+          deployment_url=$(echo "${body}" | jq -r '.service.serviceDetails.url // .service.details.url // .service.url // .url // empty' 2>/dev/null || true)
+          echo "deployment_url_candidate=${deployment_url}" >> "$GITHUB_OUTPUT"
+          echo "webhook_http_code=${http_code}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve healthcheck URL
+        id: health-url
+        env:
+          HEALTH_SEED_URL: ${{ steps.resolve.outputs.health_seed_url }}
+          HEALTHCHECK_PATH: ${{ inputs.healthcheck-path }}
+          WEBHOOK_DEPLOYMENT_URL: ${{ steps.webhook.outputs.deployment_url_candidate }}
+        run: |
+          set -euo pipefail
+
+          health_url="${HEALTH_SEED_URL}"
+          if [ -n "${WEBHOOK_DEPLOYMENT_URL}" ]; then
+            health_url="${WEBHOOK_DEPLOYMENT_URL}"
+          fi
+
+          if [ -z "${health_url}" ]; then
+            echo "âŒ No Render health URL resolved. Set healthcheck-url input or RENDER_HEALTHCHECK_URL_<ENV> secrets."
+            exit 1
+          fi
+
+          if echo "${health_url}" | grep -Eq '^https?://[^/]+/?$'; then
+            path_suffix="${HEALTHCHECK_PATH}"
+            if [ -z "${path_suffix}" ]; then
+              path_suffix="/api/v1/health"
+            fi
+            if [[ "${path_suffix}" != /* ]]; then
+              path_suffix="/${path_suffix}"
+            fi
+            health_url="${health_url%/}${path_suffix}"
+          fi
+
+          echo "healthcheck_url=${health_url}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Render health
+        id: verify
+        env:
+          HEALTHCHECK_URL: ${{ steps.health-url.outputs.healthcheck_url }}
+          EXPECTED_STATUSES: ${{ steps.resolve.outputs.expected_statuses }}
+          TIMEOUT_SECONDS: ${{ steps.resolve.outputs.timeout_seconds }}
+          INTERVAL_SECONDS: ${{ steps.resolve.outputs.interval_seconds }}
+          REQUIRE_APICENTER: ${{ inputs.require-api-center-check }}
+        run: |
+          set -euo pipefail
+
+          IFS=',' read -r -a status_codes <<< "$(echo "${EXPECTED_STATUSES}" | tr -d ' ')"
+          start_time=$(date +%s)
+          last_http_code="000"
+
+          while true; do
+            attempt_file=$(mktemp)
+            last_http_code=$(curl -sS -o "${attempt_file}" -w "%{http_code}" "${HEALTHCHECK_URL}" || echo "000")
+
+            matched=false
+            for code in "${status_codes[@]}"; do
+              if [ -n "${code}" ] && [ "${last_http_code}" = "${code}" ]; then
+                matched=true
+                break
+              fi
+            done
+
+            api_center_ok=true
+            if [ "${REQUIRE_APICENTER}" = "true" ] || [ "${REQUIRE_APICENTER}" = "True" ]; then
+              if ! jq -e '.checks.apiCenter == true' "${attempt_file}" >/dev/null 2>&1; then
+                api_center_ok=false
+              fi
+            fi
+
+            if [ "${matched}" = "true" ] && [ "${api_center_ok}" = "true" ]; then
+              echo "health_status=success" >> "$GITHUB_OUTPUT"
+              echo "health_http_code=${last_http_code}" >> "$GITHUB_OUTPUT"
+              rm -f "${attempt_file}"
+              exit 0
+            fi
+
+            now=$(date +%s)
+            elapsed=$((now - start_time))
+            if [ "${elapsed}" -ge "${TIMEOUT_SECONDS}" ]; then
+              echo "health_status=failure" >> "$GITHUB_OUTPUT"
+              echo "health_http_code=${last_http_code}" >> "$GITHUB_OUTPUT"
+              echo "âŒ Render health verification timed out at ${HEALTHCHECK_URL}"
+              echo "Last HTTP status: ${last_http_code}"
+              echo "Response sample:"
+              head -c 500 "${attempt_file}" || true
+              rm -f "${attempt_file}"
+              exit 1
+            fi
+
+            rm -f "${attempt_file}"
+            sleep "${INTERVAL_SECONDS}"
+          done
+
+      - name: Summarize Render lane
+        id: summarize
+        if: always()
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          MODE_USED: ${{ steps.resolve.outputs.mode_used }}
+          RESOLVED_HEALTHCHECK_URL: ${{ steps.health-url.outputs.healthcheck_url }}
+          HEALTH_STATUS: ${{ steps.verify.outputs.health_status }}
+          HEALTH_HTTP_CODE: ${{ steps.verify.outputs.health_http_code }}
+          WEBHOOK_HTTP_CODE: ${{ steps.webhook.outputs.webhook_http_code }}
+          WEBHOOK_DEPLOYMENT_URL: ${{ steps.webhook.outputs.deployment_url_candidate }}
+          EXPECTED_STATUSES: ${{ steps.resolve.outputs.expected_statuses }}
+          TIMEOUT_SECONDS: ${{ steps.resolve.outputs.timeout_seconds }}
+          INTERVAL_SECONDS: ${{ steps.resolve.outputs.interval_seconds }}
+        run: |
+          set -euo pipefail
+
+          final_deployment_url="${WEBHOOK_DEPLOYMENT_URL}"
+          if [ -z "${final_deployment_url}" ]; then
+            final_deployment_url="${RESOLVED_HEALTHCHECK_URL}"
+          fi
+          if [ -z "${final_deployment_url}" ]; then
+            final_deployment_url="${RUN_URL}"
+          fi
+
+          final_health_status="${HEALTH_STATUS}"
+          if [ -z "${final_health_status}" ]; then
+            final_health_status="unknown"
+          fi
+
+          final_health_http_code="${HEALTH_HTTP_CODE}"
+          if [ -z "${final_health_http_code}" ]; then
+            final_health_http_code="000"
+          fi
+
+          final_webhook_http_code="${WEBHOOK_HTTP_CODE}"
+          if [ -z "${final_webhook_http_code}" ]; then
+            final_webhook_http_code="n/a"
+          fi
+
+          echo "deployment_url=${final_deployment_url}" >> "$GITHUB_OUTPUT"
+          echo "mode_used=${MODE_USED}" >> "$GITHUB_OUTPUT"
+          echo "health_status=${final_health_status}" >> "$GITHUB_OUTPUT"
+          echo "healthcheck_url=${RESOLVED_HEALTHCHECK_URL}" >> "$GITHUB_OUTPUT"
+          echo "health_http_code=${final_health_http_code}" >> "$GITHUB_OUTPUT"
+          echo "webhook_http_code=${final_webhook_http_code}" >> "$GITHUB_OUTPUT"
+
+          echo "## Render Deployment" >> "$GITHUB_STEP_SUMMARY"
+          echo "- System: ${{ inputs.system-name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Environment: ${{ inputs.environment }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Branch: ${{ inputs.branch }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Mode: ${MODE_USED}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Health URL: ${RESOLVED_HEALTHCHECK_URL}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Health Status: ${final_health_status}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Health HTTP Code: ${final_health_http_code}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Webhook HTTP Code: ${final_webhook_http_code}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Expected Statuses: ${EXPECTED_STATUSES}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Poll Timeout: ${TIMEOUT_SECONDS}s" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Poll Interval: ${INTERVAL_SECONDS}s" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Deployment URL: [${final_deployment_url}](${final_deployment_url})" >> "$GITHUB_STEP_SUMMARY"
+

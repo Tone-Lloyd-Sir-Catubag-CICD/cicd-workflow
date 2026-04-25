@@ -1,0 +1,225 @@
+﻿# Contract: docs/workflows/backend-tests.md
+# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+# â•‘  REUSABLE: Backend Unit & Integration Tests (NestJS/Jest)      â•‘
+# â•‘  Called by any tribe's backend pipeline                        â•‘
+# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+name: "Reusable: Backend Unit Tests"
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        required: false
+        type: string
+        default: "."
+        description: "Project directory (e.g. BayaniHub-API, or '.' for root)"
+      system-name:
+        required: true
+        type: string
+        description: "System name for artifacts/display (e.g. BayaniHub-API)"
+      backend-stack:
+        required: false
+        type: string
+        default: "nestjs"
+        description: "Backend stack selected from systems JSON (nestjs|nodejs)"
+      node-version:
+        required: false
+        type: number
+        default: 24
+        description: "Node.js version"
+      test-command:
+        required: false
+        type: string
+        default: "npm run test:cov"
+        description: "Unit test command"
+      integration-test-command:
+        required: false
+        type: string
+        default: ""
+        description: "Integration test command (leave empty to skip)"
+      coverage-threshold:
+        required: false
+        type: number
+        default: 80
+        description: "Minimum coverage percentage"
+      run-parallel:
+        required: false
+        type: boolean
+        default: true
+        description: "Run tests in parallel (Jest workers)"
+      upload-artifact:
+        required: false
+        type: boolean
+        default: true
+        description: "Upload coverage artifact"
+    outputs:
+      unit-test-result:
+        description: "Unit test pass/fail"
+        value: ${{ jobs.backend-unit-tests.outputs.result }}
+      integration-test-result:
+        description: "Integration test pass/fail"
+        value: ${{ jobs.backend-integration-tests.outputs.result }}
+      coverage-percent:
+        description: "Code coverage percentage"
+        value: ${{ jobs.backend-unit-tests.outputs.coverage }}
+
+permissions:
+  contents: read
+
+jobs:
+  # â”€â”€ Unit Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  backend-unit-tests:
+    name: "Backend Unit Tests"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      result: ${{ steps.test-run.outcome }}
+      coverage: ${{ steps.coverage-check.outputs.coverage }}
+    defaults:
+      run:
+        working-directory: ./${{ inputs.working-directory }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+      - name: Install Dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Display Selected Backend Stack
+        run: |
+          echo "Backend stack: ${{ inputs.backend-stack }}"
+
+      - name: Run Unit Tests
+        id: test-run
+        env:
+          NODE_ENV: test
+          TEST_CMD: ${{ inputs.test-command }}
+          RUN_PARALLEL: ${{ inputs.run-parallel }}
+        run: |
+          if [ "${RUN_PARALLEL}" = "true" ]; then
+            bash -c "${TEST_CMD} --maxWorkers=50%"
+          else
+            bash -c "${TEST_CMD} --runInBand"
+          fi
+
+      - name: Parse Coverage
+        id: coverage-check
+        if: always()
+        run: |
+          if [ -f "coverage/coverage-summary.json" ]; then
+            COVERAGE=$(node -e "
+              const data = require('./coverage/coverage-summary.json');
+              console.log(data.total.lines.pct);
+            ")
+            echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
+            echo "ðŸ“Š Line Coverage: ${COVERAGE}%"
+
+            THRESHOLD=${{ inputs.coverage-threshold }}
+            if (( $(echo "$COVERAGE < $THRESHOLD" | bc -l) )); then
+              echo "âŒ Coverage ${COVERAGE}% is below threshold ${THRESHOLD}%"
+              exit 1
+            else
+              echo "âœ… Coverage ${COVERAGE}% meets threshold ${THRESHOLD}%"
+            fi
+          else
+            echo "coverage=unknown" >> $GITHUB_OUTPUT
+            echo "âš ï¸ Coverage summary not found"
+          fi
+
+      - name: Upload Coverage Artifact
+        if: ${{ inputs.upload-artifact && always() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.system-name }}-coverage
+          path: ${{ inputs.working-directory }}/coverage
+          retention-days: 14
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.system-name }}-unit-test-results
+          path: |
+            ${{ inputs.working-directory }}/coverage/coverage-summary.json
+            ${{ inputs.working-directory }}/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # â”€â”€ Integration Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  backend-integration-tests:
+    name: "Integration Tests"
+    if: ${{ inputs.integration-test-command != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      result: ${{ steps.integration-run.outcome }}
+    defaults:
+      run:
+        working-directory: ./${{ inputs.working-directory }}
+    services:
+      # Spins up a test database for integration tests
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+      - name: Install Dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Display Selected Backend Stack
+        run: |
+          echo "Backend stack: ${{ inputs.backend-stack }}"
+
+      - name: Run Integration Tests
+        id: integration-run
+        run: ${{ inputs.integration-test-command }}
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://test:test@localhost:5432/testdb
+          REDIS_URL: redis://localhost:6379
+
+      - name: Upload Integration Test Results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.system-name }}-integration-test-results
+          path: ${{ inputs.working-directory }}/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+

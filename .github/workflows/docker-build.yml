@@ -1,0 +1,246 @@
+﻿# Contract: docs/workflows/docker-build.md
+# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+# â•‘  REUSABLE: Docker Build & Push to GHCR                        â•‘
+# â•‘  For backend services â€” builds, tags, scans, and pushes       â•‘
+# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+name: "Reusable: Docker Build & Registry"
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        required: true
+        type: string
+        description: "Project directory containing Dockerfile"
+      image-name:
+        required: true
+        type: string
+        description: "Docker image name (e.g. bayanihub-api)"
+      dockerfile-path:
+        required: false
+        type: string
+        default: "Dockerfile"
+        description: "Path to Dockerfile relative to working directory"
+      push-image:
+        required: false
+        type: boolean
+        default: true
+        description: "Push image to GHCR"
+      scan-vulnerabilities:
+        required: false
+        type: boolean
+        default: true
+        description: "Run container vulnerability scan"
+      fail-on-vulnerabilities:
+        required: false
+        type: boolean
+        default: true
+        description: "Fail job when HIGH/CRITICAL vulnerabilities are found"
+      build-args:
+        required: false
+        type: string
+        default: ""
+        description: "Docker build arguments (key=value pairs, newline separated)"
+      generate-sbom:
+        required: false
+        type: boolean
+        default: true
+        description: "Generate SBOM attestation during build"
+      generate-provenance:
+        required: false
+        type: boolean
+        default: true
+        description: "Generate provenance attestation during build"
+      release-tag:
+        required: false
+        type: string
+        default: ""
+        description: "Optional explicit release tag to add (e.g. main-v2026.02.21.123-abc1234)"
+    outputs:
+      image-tag:
+        description: "Full image tag that was built"
+        value: ${{ jobs.docker-build.outputs.image-tag }}
+      image-digest:
+        description: "Image digest"
+        value: ${{ jobs.docker-build.outputs.digest }}
+      scan-result:
+        description: "Vulnerability scan result"
+        value: ${{ jobs.vulnerability-scan.outputs.result || jobs.docker-build.outputs.local-scan-result }}
+
+permissions:
+  contents: read
+
+jobs:
+  docker-build:
+    name: "Docker Build & Push"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      digest: ${{ steps.build-push.outputs.digest }}
+      image-repo: ${{ steps.coords.outputs.image_repo }}
+      local-scan-result: ${{ steps.local-scan.outcome }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Normalize image coordinates
+        id: coords
+        env:
+          OWNER: ${{ github.repository_owner }}
+          IMAGE: ${{ inputs.image-name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          OWNER_LC=$(echo "${OWNER}" | tr '[:upper:]' '[:lower:]')
+          IMAGE_LC=$(echo "${IMAGE}" | tr '[:upper:]' '[:lower:]')
+          IMAGE_REPO="ghcr.io/${OWNER_LC}/${IMAGE_LC}"
+          CACHE_SCOPE=$(echo "${REPOSITORY}-${IMAGE_LC}" | tr '[:upper:]' '[:lower:]' | sed 's#[^a-z0-9._-]#-#g')
+
+          echo "owner_lc=${OWNER_LC}" >> "$GITHUB_OUTPUT"
+          echo "image_lc=${IMAGE_LC}" >> "$GITHUB_OUTPUT"
+          echo "image_repo=${IMAGE_REPO}" >> "$GITHUB_OUTPUT"
+          echo "cache_scope=${CACHE_SCOPE}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.coords.outputs.image_repo }}
+          tags: |
+            type=sha,format=long,prefix=sha-
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=raw,value=${{ inputs.release-tag }},enable=${{ inputs.release-tag != '' }}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and Push
+        id: build-push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ inputs.working-directory }}
+          file: ./${{ inputs.working-directory }}/${{ inputs.dockerfile-path }}
+          push: ${{ inputs.push-image }}
+          load: ${{ !inputs.push-image }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ steps.coords.outputs.cache_scope }}
+          cache-to: type=gha,mode=max,scope=${{ steps.coords.outputs.cache_scope }}
+          build-args: ${{ inputs.build-args }}
+          sbom: ${{ inputs.push-image && inputs.generate-sbom }}
+          provenance: ${{ inputs.push-image && inputs.generate-provenance }}
+
+      - name: Image Summary
+        run: |
+          echo "ðŸ³ Image Tags:"
+          echo "${{ steps.meta.outputs.tags }}"
+          echo ""
+          echo "ðŸ·ï¸ Git SHA: ${{ github.sha }}"
+
+      # When not pushing, scan the locally-loaded image in this job
+      # (the separate vulnerability-scan job can only pull from GHCR)
+      - name: Local Vulnerability Scan
+        id: local-scan
+        if: ${{ !inputs.push-image && inputs.scan-vulnerabilities }}
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: "image"
+          image-ref: "${{ steps.coords.outputs.image_repo }}:sha-${{ github.sha }}"
+          format: "table"
+          severity: "CRITICAL,HIGH"
+          scanners: "vuln"
+          ignore-unfixed: true
+          exit-code: ${{ inputs.fail-on-vulnerabilities && '1' || '0' }}
+
+  vulnerability-scan:
+    name: "Container Security Scan"
+    if: ${{ inputs.scan-vulnerabilities && inputs.push-image }}
+    needs: docker-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    outputs:
+      result: ${{ steps.scan.outcome }}
+    steps:
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image reference
+        id: image-ref
+        env:
+          IMAGE_REPO: ${{ needs.docker-build.outputs.image-repo }}
+          DIGEST: ${{ needs.docker-build.outputs.digest }}
+          RELEASE_TAG: ${{ inputs.release-tag }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          if [ -n "${DIGEST}" ]; then
+            echo "image_ref=${IMAGE_REPO}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          else
+            TAG="${RELEASE_TAG}"
+            if [ -z "${TAG}" ]; then
+              TAG="sha-${GIT_SHA}"
+            fi
+            echo "image_ref=${IMAGE_REPO}:${TAG}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run Trivy Vulnerability Scanner
+        id: scan
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          image-ref: ${{ steps.image-ref.outputs.image_ref }}
+          format: "sarif"
+          output: "trivy-results.sarif"
+          severity: "CRITICAL,HIGH"
+          scanners: "vuln"
+          ignore-unfixed: true
+          exit-code: ${{ inputs.fail-on-vulnerabilities && '1' || '0' }}
+
+      - name: Check SARIF file exists
+        if: always()
+        id: sarif-check
+        run: |
+          if [ -f "trivy-results.sarif" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "âš ï¸ trivy-results.sarif was not generated."
+          fi
+
+      - name: Upload Trivy Scan Results
+        if: always() && steps.sarif-check.outputs.exists == 'true'
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: "trivy-results.sarif"
+
+      - name: Upload Scan Artifact
+        if: always() && steps.sarif-check.outputs.exists == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.image-name }}-security-scan
+          path: trivy-results.sarif
+          retention-days: 30
+
+

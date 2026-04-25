@@ -1,0 +1,297 @@
+﻿# Contract: docs/workflows/workflow-validation.md
+name: "Workflow Validation"
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - "workflow-templates/**"
+      - "MOBILE_PIPELINE_PRESETS_AND_PROMPT.md"
+      - "USER_STORIES_STATUS.md"
+  workflow_dispatch:
+  # Allows caller workflows to reuse workflow validation when needed.
+  workflow_call:
+    inputs:
+      systems-json:
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: "Actionlint"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Run actionlint
+        uses: docker://rhysd/actionlint:latest
+        with:
+          args: -color
+
+  validate-mobile-templates:
+    name: "Validate Mobile Granular Templates"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Assert mobile granular template contract
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          assert_contains() {
+            local file="$1"
+            local expected="$2"
+            if ! grep -Fq "$expected" "$file"; then
+              echo "âŒ Expected '$expected' in $file"
+              exit 1
+            fi
+          }
+
+          TEMPLATE="workflow-templates/mobile-expo.yml"
+
+          assert_contains "$TEMPLATE" "uses: ImplementSprint/central-workflow/.github/workflows/mobile-tests.yml@v1"
+          assert_contains "$TEMPLATE" "uses: ImplementSprint/central-workflow/.github/workflows/lint-check.yml@v1"
+          assert_contains "$TEMPLATE" "uses: ImplementSprint/central-workflow/.github/workflows/security-scan.yml@v1"
+          assert_contains "$TEMPLATE" "uses: ImplementSprint/central-workflow/.github/workflows/mobile-gradle.yml@v1"
+          assert_contains "$TEMPLATE" "uses: ImplementSprint/central-workflow/.github/workflows/mobile-maestro.yml@v1"
+          assert_contains "$TEMPLATE" "needs: [unit-tests, lint, security]"
+          assert_contains "$TEMPLATE" "mobile_stack"
+          assert_contains "$TEMPLATE" "run_android_build"
+          assert_contains "$TEMPLATE" "run_maestro"
+
+          echo "Mobile granular template validated."
+
+  simulate-mobile-config-matrix:
+    name: "Simulate Mobile Config Matrix"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Validate normalization + stack classification
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          normalize_and_validate() {
+            local input_json="$1"
+            local normalized=""
+            local type=""
+
+            type=$(echo "$input_json" | jq -r 'type')
+            if [ "$type" = "object" ]; then
+              normalized=$(echo "$input_json" | jq -c '[.]')
+            elif [ "$type" = "array" ]; then
+              normalized=$(echo "$input_json" | jq -c .)
+            else
+              echo "âŒ Config JSON must be object or array"
+              exit 1
+            fi
+
+            echo "$normalized" | jq -e 'length > 0' >/dev/null
+            echo "$normalized" | jq -e 'all(.[]; (.name|type=="string" and length>0) and (.dir|type=="string" and length>0) and (.mobile_stack|type=="string" and length>0))' >/dev/null
+            echo "$normalized"
+          }
+
+          classify_target() {
+            local system_json="$1"
+            local stack_declared=""
+
+            stack_declared=$(echo "$system_json" | jq -r '(.mobile_stack // .stack // .framework // "") | ascii_downcase | gsub("[ _]"; "-")')
+
+            case "$stack_declared" in
+              expo)
+                echo "expo"
+                ;;
+              kotlin|android-kotlin|native-kotlin)
+                echo "kotlin"
+                ;;
+              react-native|rn)
+                echo "react-native"
+                ;;
+              *)
+                echo "invalid"
+                ;;
+            esac
+          }
+
+          EXPO_SINGLE='{"name":"mobile-expo","dir":".","mobile_stack":"expo"}'
+          KOTLIN_SINGLE='{"name":"mobile-kotlin","dir":".","mobile_stack":"kotlin"}'
+          RN_SINGLE='{"name":"mobile-rn","dir":".","mobile_stack":"react-native"}'
+          MIXED_MULTI='[{"name":"mobile-expo","dir":"apps/mobile-expo","mobile_stack":"expo"},{"name":"mobile-kotlin","dir":"apps/mobile-kotlin","mobile_stack":"kotlin"}]'
+          INVALID_SINGLE='{"name":"mobile-invalid","dir":".","mobile_stack":"swift"}'
+
+          EXPO_NORM=$(normalize_and_validate "$EXPO_SINGLE")
+          KOTLIN_NORM=$(normalize_and_validate "$KOTLIN_SINGLE")
+          RN_NORM=$(normalize_and_validate "$RN_SINGLE")
+          MIXED_NORM=$(normalize_and_validate "$MIXED_MULTI")
+          INVALID_NORM=$(normalize_and_validate "$INVALID_SINGLE")
+
+          if [ "$(echo "$EXPO_NORM" | jq 'length')" -ne 1 ]; then
+            echo "âŒ Expo single normalization failed"
+            exit 1
+          fi
+
+          if [ "$(echo "$KOTLIN_NORM" | jq 'length')" -ne 1 ]; then
+            echo "âŒ Kotlin single normalization failed"
+            exit 1
+          fi
+
+          if [ "$(echo "$RN_NORM" | jq 'length')" -ne 1 ]; then
+            echo "âŒ React Native single normalization failed"
+            exit 1
+          fi
+
+          if [ "$(echo "$MIXED_NORM" | jq 'length')" -lt 2 ]; then
+            echo "âŒ Mixed multi normalization failed"
+            exit 1
+          fi
+
+          EXPO_CLASS=$(classify_target "$(echo "$EXPO_NORM" | jq -c '.[0]')")
+          KOTLIN_CLASS=$(classify_target "$(echo "$KOTLIN_NORM" | jq -c '.[0]')")
+          RN_CLASS=$(classify_target "$(echo "$RN_NORM" | jq -c '.[0]')")
+          INVALID_CLASS=$(classify_target "$(echo "$INVALID_NORM" | jq -c '.[0]')")
+
+          if [ "$EXPO_CLASS" != "expo" ]; then
+            echo "âŒ Expo sample classification expected expo, got $EXPO_CLASS"
+            exit 1
+          fi
+
+          if [ "$KOTLIN_CLASS" != "kotlin" ]; then
+            echo "âŒ Kotlin sample classification expected kotlin, got $KOTLIN_CLASS"
+            exit 1
+          fi
+
+          if [ "$RN_CLASS" != "react-native" ]; then
+            echo "âŒ React Native sample classification expected react-native, got $RN_CLASS"
+            exit 1
+          fi
+
+          if [ "$INVALID_CLASS" != "invalid" ]; then
+            echo "âŒ Invalid sample classification expected invalid, got $INVALID_CLASS"
+            exit 1
+          fi
+
+          echo "âœ… Mobile config matrix simulation passed."
+
+  validate-backend-template:
+    name: "Validate Backend Granular Template"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Assert backend granular template contract
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          assert_contains() {
+            local file="$1"
+            local expected="$2"
+            if ! grep -Fq "$expected" "$file"; then
+              echo "âŒ Expected '$expected' in $file"
+              exit 1
+            fi
+          }
+
+          TEMPLATE="workflow-templates/be-nodejs.yml"
+
+          assert_contains "$TEMPLATE" "uses: ImplementSprint/central-workflow/.github/workflows/backend-tests.yml@v1"
+          assert_contains "$TEMPLATE" "uses: ImplementSprint/central-workflow/.github/workflows/lint-check.yml@v1"
+          assert_contains "$TEMPLATE" "uses: ImplementSprint/central-workflow/.github/workflows/security-scan.yml@v1"
+          assert_contains "$TEMPLATE" "uses: ImplementSprint/central-workflow/.github/workflows/docker-build.yml@v1"
+          assert_contains "$TEMPLATE" "needs: [unit-tests, lint, security]"
+          assert_contains "$TEMPLATE" "backend_stack"
+          assert_contains "$TEMPLATE" "docker_image"
+
+          echo "Backend granular template validated."
+
+  simulate-backend-config-matrix:
+    name: "Simulate Backend Config Matrix"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Validate backend normalization + stack classification
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          normalize_and_validate() {
+            local input_json="$1"
+            local normalized=""
+            local type=""
+
+            type=$(echo "$input_json" | jq -r 'type')
+            if [ "$type" = "object" ]; then
+              normalized=$(echo "$input_json" | jq -c '[.]')
+            elif [ "$type" = "array" ]; then
+              normalized=$(echo "$input_json" | jq -c .)
+            else
+              echo "âŒ Config JSON must be object or array"
+              exit 1
+            fi
+
+            echo "$normalized" | jq -e 'length > 0' >/dev/null
+            echo "$normalized" | jq -e 'all(.[]; (.name|type=="string" and length>0) and (.dir|type=="string" and length>0) and (.image|type=="string" and length>0))' >/dev/null
+            echo "$normalized"
+          }
+
+          normalize_stack() {
+            local system_json="$1"
+            echo "$system_json" | jq -r '(.backend_stack // .stack // .framework // "nestjs") | ascii_downcase | gsub("[ _]"; "-")'
+          }
+
+          NEST_SINGLE='{"name":"backend-nest","dir":".","image":"ghcr.io/acme/backend-nest","backend_stack":"nestjs"}'
+          NODE_SINGLE='{"name":"backend-node","dir":".","image":"ghcr.io/acme/backend-node","backend_stack":"nodejs"}'
+          LEGACY_SINGLE='{"name":"backend-legacy","dir":".","image":"ghcr.io/acme/backend-legacy"}'
+          ALIAS_SINGLE='{"name":"backend-alias","dir":".","image":"ghcr.io/acme/backend-alias","framework":"Node_JS"}'
+          INVALID_SINGLE='{"name":"backend-invalid","dir":".","image":"ghcr.io/acme/backend-invalid","backend_stack":"go"}'
+
+          NEST_NORM=$(normalize_and_validate "$NEST_SINGLE")
+          NODE_NORM=$(normalize_and_validate "$NODE_SINGLE")
+          LEGACY_NORM=$(normalize_and_validate "$LEGACY_SINGLE")
+          ALIAS_NORM=$(normalize_and_validate "$ALIAS_SINGLE")
+          INVALID_NORM=$(normalize_and_validate "$INVALID_SINGLE")
+
+          NEST_STACK=$(normalize_stack "$(echo "$NEST_NORM" | jq -c '.[0]')")
+          NODE_STACK=$(normalize_stack "$(echo "$NODE_NORM" | jq -c '.[0]')")
+          LEGACY_STACK=$(normalize_stack "$(echo "$LEGACY_NORM" | jq -c '.[0]')")
+          ALIAS_STACK=$(normalize_stack "$(echo "$ALIAS_NORM" | jq -c '.[0]')")
+          INVALID_STACK=$(normalize_stack "$(echo "$INVALID_NORM" | jq -c '.[0]')")
+
+          if [ "$NEST_STACK" != "nestjs" ]; then
+            echo "âŒ Nest sample classification expected nestjs, got $NEST_STACK"
+            exit 1
+          fi
+
+          if [ "$NODE_STACK" != "nodejs" ]; then
+            echo "âŒ Node sample classification expected nodejs, got $NODE_STACK"
+            exit 1
+          fi
+
+          if [ "$LEGACY_STACK" != "nestjs" ]; then
+            echo "âŒ Legacy sample default expected nestjs, got $LEGACY_STACK"
+            exit 1
+          fi
+
+          if [ "$ALIAS_STACK" != "nodejs" ]; then
+            echo "âŒ Alias sample expected nodejs, got $ALIAS_STACK"
+            exit 1
+          fi
+
+          if [ "$INVALID_STACK" = "nestjs" ] || [ "$INVALID_STACK" = "nodejs" ]; then
+            echo "âŒ Invalid sample should not classify as a supported backend stack"
+            exit 1
+          fi
+
+          echo "âœ… Backend config matrix simulation passed."
+
+

@@ -1,0 +1,113 @@
+﻿# Contract: docs/workflows/governance-check.md
+# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+# â•‘  REUSABLE: Governance Checks                                   â•‘
+# â•‘  Test execution + coverage gate + artifact upload              â•‘
+# â•‘  Works for any Node.js project (frontend/backend/mobile)      â•‘
+# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+name: "Reusable: Governance Checks"
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        required: false
+        type: string
+        default: "."
+        description: "Working directory for the checks"
+      system-name:
+        required: true
+        type: string
+        description: "System name for artifacts/display"
+      node-version:
+        required: false
+        type: number
+        default: 24
+        description: "Node.js version"
+      test-command:
+        required: true
+        type: string
+        description: "Test command to run"
+      coverage-threshold:
+        required: false
+        type: number
+        default: 80
+        description: "Minimum code coverage percentage"
+    outputs:
+      test-result:
+        description: "Test result"
+        value: ${{ jobs.governance.outputs.result }}
+
+permissions:
+  contents: read
+
+jobs:
+  governance:
+    name: "Governance Checks"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      result: ${{ steps.tests.outcome }}
+    defaults:
+      run:
+        working-directory: ./${{ inputs.working-directory }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+          cache-dependency-path: |
+            **/package-lock.json
+
+      - name: Install Dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run Tests with Coverage
+        id: tests
+        run: ${{ inputs.test-command }}
+
+      - name: Check Coverage Threshold
+        run: |
+          if [ -f "coverage/coverage-summary.json" ]; then
+            METRICS=$(node -e "
+              const data = require('./coverage/coverage-summary.json');
+              const total = data.total || {};
+              const lines = total.lines?.pct;
+              const functions = total.functions?.pct;
+              const branches = total.branches?.pct;
+              const statements = total.statements?.pct;
+              if ([lines, functions, branches, statements].some(v => typeof v !== 'number' || Number.isNaN(v))) {
+                throw new Error('coverage-summary.json is missing one or more required numeric metrics (lines/functions/branches/statements).');
+              }
+              console.log([lines, functions, branches, statements].join(' '));
+            ")
+            read -r LINES_COVERAGE FUNCTIONS_COVERAGE BRANCHES_COVERAGE STATEMENTS_COVERAGE <<< "${METRICS}"
+
+            echo "ðŸ“Š Coverage â€” lines: ${LINES_COVERAGE}%, functions: ${FUNCTIONS_COVERAGE}%, branches: ${BRANCHES_COVERAGE}%, statements: ${STATEMENTS_COVERAGE}%"
+            THRESHOLD=${{ inputs.coverage-threshold }}
+            if (( $(echo "$LINES_COVERAGE < $THRESHOLD" | bc -l) )) || \
+               (( $(echo "$FUNCTIONS_COVERAGE < $THRESHOLD" | bc -l) )) || \
+               (( $(echo "$BRANCHES_COVERAGE < $THRESHOLD" | bc -l) )) || \
+               (( $(echo "$STATEMENTS_COVERAGE < $THRESHOLD" | bc -l) )); then
+              echo "âŒ Coverage is below threshold ${THRESHOLD}% (lines/functions/branches/statements must all pass)"
+              exit 1
+            else
+              echo "âœ… Coverage meets threshold ${THRESHOLD}% for lines/functions/branches/statements"
+            fi
+          else
+            echo "âŒ coverage/coverage-summary.json not found â€” failing coverage gate"
+            exit 1
+          fi
+
+      - name: Upload Coverage Reports
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: ${{ inputs.system-name }}-governance-coverage
+          path: ${{ inputs.working-directory }}/coverage
+          retention-days: 14
+
+

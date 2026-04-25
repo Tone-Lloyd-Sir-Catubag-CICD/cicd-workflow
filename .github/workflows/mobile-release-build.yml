@@ -1,0 +1,438 @@
+﻿# Contract: docs/workflows/mobile-release-build.md
+name: "Reusable: Mobile Release Build"
+
+on:
+  workflow_dispatch:
+    inputs:
+      system-dir:
+        required: false
+        type: string
+        default: "."
+        description: "Expo project directory (e.g. app folder, or '.' for root)"
+      system-name:
+        required: true
+        type: string
+        description: "System name for artifacts/display (e.g. BayaniHub-Mobile)"
+      node-version:
+        required: false
+        type: string
+        default: "24"
+        description: "Node.js version"
+      java-version:
+        required: false
+        type: string
+        default: "17"
+        description: "JDK version for Android builds"
+      enable-android-release-build:
+        required: false
+        type: boolean
+        default: true
+        description: "Run Android release build for distributable artifacts (.aab/.apk)"
+      enable-ios-release-build:
+        required: false
+        type: boolean
+        default: true
+        description: "Run iOS app build and upload .app artifact (.zip)"
+      android-release-gradle-task:
+        required: false
+        type: string
+        default: "assembleRelease bundleRelease"
+        description: "Gradle task(s) for Android release output"
+      ios-release-export-enabled:
+        required: false
+        type: boolean
+        default: false
+        description: "Reserved for signed iOS export (IPA) once provisioning is configured"
+
+  workflow_call:
+    inputs:
+      system-dir:
+        required: false
+        type: string
+        default: "."
+        description: "Expo project directory (e.g. app folder, or '.' for root)"
+      system-name:
+        required: true
+        type: string
+        description: "System name for artifacts/display (e.g. BayaniHub-Mobile)"
+      node-version:
+        required: false
+        type: number
+        default: 24
+        description: "Node.js version"
+      java-version:
+        required: false
+        type: string
+        default: "17"
+        description: "JDK version for Android builds"
+      enable-android-release-build:
+        required: false
+        type: boolean
+        default: true
+        description: "Run Android release build for distributable artifacts (.aab/.apk)"
+      enable-ios-release-build:
+        required: false
+        type: boolean
+        default: true
+        description: "Run iOS app build and upload .app artifact (.zip)"
+      android-release-gradle-task:
+        required: false
+        type: string
+        default: "assembleRelease bundleRelease"
+        description: "Gradle task(s) for Android release output"
+      ios-release-export-enabled:
+        required: false
+        type: boolean
+        default: false
+        description: "Reserved for signed iOS export (IPA) once provisioning is configured"
+
+permissions:
+  contents: read
+
+jobs:
+  branch-guard:
+    name: "Validate release branch"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Ensure branch is allowed
+        run: |
+          case "${GITHUB_REF_NAME}" in
+            test|uat|main)
+              echo "âœ… Release build branch allowed: ${GITHUB_REF_NAME}"
+              ;;
+            *)
+              echo "âŒ Release build workflow is only allowed on test, uat, or main. Current: ${GITHUB_REF_NAME}"
+              exit 1
+              ;;
+          esac
+
+  android-release-build:
+    name: "Android Release Build (.aab/.apk)"
+    needs: [branch-guard]
+    if: ${{ inputs.enable-android-release-build }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: ./${{ inputs.system-dir }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Detect package manager
+        id: detect-pm
+        run: |
+          if [ -f "yarn.lock" ]; then
+            echo "pm=yarn" >> "$GITHUB_OUTPUT"
+          elif [ -f "pnpm-lock.yaml" ]; then
+            echo "pm=pnpm" >> "$GITHUB_OUTPUT"
+          elif [ -f "package-lock.json" ] || [ -f "npm-shrinkwrap.json" ] || [ -f "package.json" ]; then
+            echo "pm=npm" >> "$GITHUB_OUTPUT"
+          else
+            echo "âŒ package.json is required."
+            exit 1
+          fi
+
+      - name: Setup Node.js ${{ inputs.node-version }} (npm)
+        if: ${{ steps.detect-pm.outputs.pm == 'npm' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+          cache-dependency-path: |
+            **/package-lock.json
+
+      - name: Setup Node.js ${{ inputs.node-version }} (yarn)
+        if: ${{ steps.detect-pm.outputs.pm == 'yarn' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "yarn"
+          cache-dependency-path: |
+            **/yarn.lock
+
+      - name: Setup Node.js ${{ inputs.node-version }} (pnpm)
+        if: ${{ steps.detect-pm.outputs.pm == 'pnpm' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "pnpm"
+          cache-dependency-path: |
+            **/pnpm-lock.yaml
+
+      - name: Install Dependencies
+        env:
+          PACKAGE_MANAGER: ${{ steps.detect-pm.outputs.pm }}
+        run: |
+          if [ "${PACKAGE_MANAGER}" = "yarn" ]; then
+            corepack enable
+            yarn install --frozen-lockfile --ignore-scripts
+          elif [ "${PACKAGE_MANAGER}" = "pnpm" ]; then
+            corepack enable
+            pnpm install --frozen-lockfile --ignore-scripts
+          else
+            npm ci --ignore-scripts
+          fi
+
+      - name: Ensure Android Native Project
+        run: |
+          if [ ! -d "android" ]; then
+            CI=1 npx expo prebuild --platform android
+          fi
+
+      - name: Ensure Kotlin Version Fallback
+        run: |
+          if [ -f "android/gradle.properties" ]; then
+            if grep -q '^kotlinVersion=' android/gradle.properties; then
+              CURRENT_VERSION=$(grep '^kotlinVersion=' android/gradle.properties | head -n 1 | cut -d'=' -f2-)
+              echo "â„¹ï¸ Preserving project kotlinVersion=${CURRENT_VERSION}"
+            else
+              echo 'kotlinVersion=2.0.21' >> android/gradle.properties
+              echo "âœ… Added fallback kotlinVersion=2.0.21"
+            fi
+          fi
+
+      - name: Resolve Gradle Wrapper Directory
+        id: gradle
+        run: |
+          if [ -f "./gradlew" ]; then
+            GRADLE_DIR="."
+          elif [ -f "android/gradlew" ]; then
+            GRADLE_DIR="android"
+          else
+            WRAPPER_PATH=$(find . -maxdepth 4 -type f -name gradlew | head -n 1)
+            if [ -z "${WRAPPER_PATH}" ]; then
+              echo "âŒ Could not find gradlew in project."
+              exit 1
+            fi
+            GRADLE_DIR=$(dirname "${WRAPPER_PATH}")
+            GRADLE_DIR="${GRADLE_DIR#./}"
+          fi
+
+          echo "gradle_dir=${GRADLE_DIR}" >> "$GITHUB_OUTPUT"
+          echo "âœ… Using gradle wrapper directory: ${GRADLE_DIR}"
+
+      - name: Setup JDK ${{ inputs.java-version }}
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: ${{ inputs.java-version }}
+
+      - name: Setup Gradle Cache
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Run Android release build task
+        run: |
+          cd "${{ steps.gradle.outputs.gradle_dir }}"
+          chmod +x gradlew
+          ./gradlew ${{ inputs.android-release-gradle-task }} --no-daemon --stacktrace --warning-mode all
+
+      - name: Stage Android release artifacts (flat)
+        id: stage-android-release
+        run: |
+          OUTPUT_DIR="release-artifacts/android"
+          mkdir -p "${OUTPUT_DIR}"
+
+          SEARCH_ROOT="${{ steps.gradle.outputs.gradle_dir }}/app/build/outputs"
+          APK_PATH=$(find "${SEARCH_ROOT}" -type f -name "*.apk" ! -name "*-androidTest.apk" -printf '%s\t%p\n' 2>/dev/null | sort -nr | head -n 1 | cut -f2-)
+          AAB_PATH=$(find "${SEARCH_ROOT}" -type f -name "*.aab" -printf '%s\t%p\n' 2>/dev/null | sort -nr | head -n 1 | cut -f2-)
+
+          if [ -z "${APK_PATH}" ] && [ -z "${AAB_PATH}" ]; then
+            echo "âŒ No Android release APK/AAB outputs found under ${SEARCH_ROOT}."
+            exit 1
+          fi
+
+          if [ -n "${APK_PATH}" ]; then
+            cp "${APK_PATH}" "${OUTPUT_DIR}/${{ inputs.system-name }}-android.apk"
+            echo "âœ… Staged release APK: ${APK_PATH}"
+          fi
+
+          if [ -n "${AAB_PATH}" ]; then
+            cp "${AAB_PATH}" "${OUTPUT_DIR}/${{ inputs.system-name }}-android.aab"
+            echo "âœ… Staged release AAB: ${AAB_PATH}"
+          fi
+
+      - name: Upload Android release artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.system-name }}-android-release-build
+          path: |
+            ${{ inputs.system-dir }}/release-artifacts/android/*.apk
+            ${{ inputs.system-dir }}/release-artifacts/android/*.aab
+          if-no-files-found: error
+          retention-days: 14
+
+  ios-release-build:
+    name: "iOS App Build (.app)"
+    needs: [branch-guard]
+    if: ${{ inputs.enable-ios-release-build }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: ./${{ inputs.system-dir }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Detect package manager
+        id: detect-pm
+        run: |
+          if [ -f "yarn.lock" ]; then
+            echo "pm=yarn" >> "$GITHUB_OUTPUT"
+          elif [ -f "pnpm-lock.yaml" ]; then
+            echo "pm=pnpm" >> "$GITHUB_OUTPUT"
+          elif [ -f "package-lock.json" ] || [ -f "npm-shrinkwrap.json" ] || [ -f "package.json" ]; then
+            echo "pm=npm" >> "$GITHUB_OUTPUT"
+          else
+            echo "âŒ package.json is required."
+            exit 1
+          fi
+
+      - name: Setup Node.js ${{ inputs.node-version }} (npm)
+        if: ${{ steps.detect-pm.outputs.pm == 'npm' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+          cache-dependency-path: |
+            **/package-lock.json
+
+      - name: Setup Node.js ${{ inputs.node-version }} (yarn)
+        if: ${{ steps.detect-pm.outputs.pm == 'yarn' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "yarn"
+          cache-dependency-path: |
+            **/yarn.lock
+
+      - name: Setup Node.js ${{ inputs.node-version }} (pnpm)
+        if: ${{ steps.detect-pm.outputs.pm == 'pnpm' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "pnpm"
+          cache-dependency-path: |
+            **/pnpm-lock.yaml
+
+      - name: Install Dependencies
+        env:
+          PACKAGE_MANAGER: ${{ steps.detect-pm.outputs.pm }}
+        run: |
+          if [ "${PACKAGE_MANAGER}" = "yarn" ]; then
+            corepack enable
+            yarn install --frozen-lockfile --ignore-scripts
+          elif [ "${PACKAGE_MANAGER}" = "pnpm" ]; then
+            corepack enable
+            pnpm install --frozen-lockfile --ignore-scripts
+          else
+            npm ci --ignore-scripts
+          fi
+
+      - name: Select Xcode 26.2
+        run: |
+          sw_vers
+          sudo xcode-select -s /Applications/Xcode_26.2.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Ensure iOS Native Project
+        run: |
+          if [ ! -d "ios" ]; then
+            CI=1 npx expo prebuild --platform ios
+          fi
+
+      - name: Install CocoaPods Dependencies
+        if: ${{ hashFiles(format('{0}/ios/Podfile', inputs.system-dir)) != '' }}
+        run: |
+          if command -v npx >/dev/null 2>&1; then
+            npx pod-install --project-directory=ios
+          else
+            cd ios
+            pod install
+            cd - >/dev/null
+          fi
+
+      - name: Resolve iOS scheme
+        id: ios-scheme
+        run: |
+          WORKSPACE_PATH=$(find ios -maxdepth 2 -type d -name "*.xcworkspace" ! -path "*/*.xcodeproj/*" | head -n 1)
+          if [ -z "${WORKSPACE_PATH}" ]; then
+            WORKSPACE_PATH=$(find ios -maxdepth 3 -type d -name "*.xcworkspace" ! -path "*/*.xcodeproj/*" | head -n 1)
+          fi
+          PROJECT_PATH=$(find ios -maxdepth 2 -name "*.xcodeproj" | head -n 1)
+
+          if [ -n "${WORKSPACE_PATH}" ]; then
+            LIST_JSON=$(xcodebuild -list -json -workspace "${WORKSPACE_PATH}")
+            CONTAINER_FLAG="-workspace"
+            CONTAINER_PATH="${WORKSPACE_PATH}"
+          elif [ -n "${PROJECT_PATH}" ]; then
+            LIST_JSON=$(xcodebuild -list -json -project "${PROJECT_PATH}")
+            CONTAINER_FLAG="-project"
+            CONTAINER_PATH="${PROJECT_PATH}"
+          else
+            echo "âŒ No Xcode workspace/project found under ios/."
+            exit 1
+          fi
+
+          AVAILABLE_SCHEMES=$(LIST_JSON="${LIST_JSON}" python3 -c "import json, os; data = json.loads(os.environ['LIST_JSON']); schemes = (data.get('workspace', {}).get('schemes') or []) + (data.get('project', {}).get('schemes') or []); seen = []; [seen.append(scheme) for scheme in schemes if scheme not in seen]; print('\\n'.join(seen))")
+
+          SCHEME=$(CONTAINER_PATH="${CONTAINER_PATH}" AVAILABLE_SCHEMES="${AVAILABLE_SCHEMES}" python3 -c "import os, re; container_path = os.environ.get('CONTAINER_PATH', ''); schemes = [line.strip() for line in os.environ.get('AVAILABLE_SCHEMES', '').splitlines() if line.strip()]; container_name = os.path.splitext(os.path.basename(container_path))[0]; preferred_names = [container_name]; excluded = re.compile(r'^(Pods($|-)|.*Tests?$|.*UITests?$|.*UnitTests?$|.*IntegrationTests?$|.*SnapshotTests?$|.*tvOS.*|.*macOS.*)$', re.I); exact = next((scheme for preferred in preferred_names for scheme in schemes if not excluded.match(scheme) and scheme.lower() == preferred.lower()), None); contains = next((scheme for preferred in preferred_names for scheme in schemes if not excluded.match(scheme) and preferred and preferred.lower() in scheme.lower()), None); fallback = next((scheme for scheme in schemes if not excluded.match(scheme)), schemes[0] if schemes else ''); print(exact or contains or fallback)")
+
+          if [ -z "${SCHEME}" ]; then
+            echo "âŒ Could not resolve an iOS scheme for build."
+            exit 1
+          fi
+
+          echo "container_flag=${CONTAINER_FLAG}" >> "$GITHUB_OUTPUT"
+          echo "container_path=${CONTAINER_PATH}" >> "$GITHUB_OUTPUT"
+          echo "scheme=${SCHEME}" >> "$GITHUB_OUTPUT"
+          echo "âœ… Using iOS scheme: ${SCHEME}"
+
+      - name: Build iOS app artifact (.app)
+        id: build-ios-release-app
+        env:
+          CONTAINER_FLAG: ${{ steps.ios-scheme.outputs.container_flag }}
+          CONTAINER_PATH: ${{ steps.ios-scheme.outputs.container_path }}
+          SCHEME: ${{ steps.ios-scheme.outputs.scheme }}
+          FORCE_BUNDLING: "1"
+          SKIP_BUNDLING: ""
+        run: |
+          xcodebuild \
+            ${CONTAINER_FLAG} "${CONTAINER_PATH}" \
+            -scheme "${SCHEME}" \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath ios/build \
+            CODE_SIGNING_ALLOWED=NO \
+            CLANG_WARN_NULLABILITY_COMPLETENESS=NO \
+            GCC_TREAT_WARNINGS_AS_ERRORS=NO \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=NO \
+            clean build
+
+          APP_PATH=$(find ios/build/Build/Products -type d -name "*.app" | head -n 1)
+          if [ -z "${APP_PATH}" ]; then
+            echo "âŒ iOS .app output not found after build."
+            exit 1
+          fi
+
+          ZIP_PATH="build/${{ inputs.system-name }}-ios-release-app.zip"
+          ditto -c -k --sequesterRsrc --keepParent "${APP_PATH}" "${ZIP_PATH}"
+          echo "artifact_path=${PWD}/${ZIP_PATH}" >> "$GITHUB_OUTPUT"
+          echo "âœ… iOS .app zipped for upload."
+
+      - name: Reserve signed iOS export
+        if: ${{ inputs.ios-release-export-enabled }}
+        run: |
+          echo "â„¹ï¸ Signed iOS export is reserved for future hardening (certificates/profiles)."
+
+      - name: Upload iOS app artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.system-name }}-ios-release-build
+          path: ${{ steps.build-ios-release-app.outputs.artifact_path }}
+          retention-days: 14
+
+

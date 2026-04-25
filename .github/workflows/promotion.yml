@@ -1,0 +1,589 @@
+﻿# Contract: docs/workflows/promotion.md
+name: "Reusable: Promotion"
+
+on:
+  workflow_call:
+    inputs:
+      pipeline-kind:
+        required: true
+        type: string
+        description: "single or multi"
+      direction:
+        required: true
+        type: string
+        description: "Promotion direction: test-to-uat or uat-to-main"
+      system1-name:
+        required: false
+        type: string
+        default: "Frontend-Root"
+      system1-url:
+        required: false
+        type: string
+        default: ""
+      system2-name:
+        required: false
+        type: string
+        default: ""
+      system2-url:
+        required: false
+        type: string
+        default: ""
+      system3-name:
+        required: false
+        type: string
+        default: ""
+      system3-url:
+        required: false
+        type: string
+        default: ""
+      version-tag:
+        required: false
+        type: string
+        default: ""
+      versions-json:
+        required: false
+        type: string
+        default: "{}"
+      systems-json:
+        required: false
+        type: string
+        default: ""
+      deployment-urls-json:
+        required: false
+        type: string
+        default: "{}"
+      artifact-kind:
+        required: false
+        type: string
+        default: "deployment"
+        description: "Artifact kind shown in the PR body (deployment or release)"
+      artifact-links-json:
+        required: false
+        type: string
+        default: ""
+        description: "Artifact links JSON keyed by system; overrides deployment links when provided"
+      quality-gates-json:
+        required: false
+        type: string
+        default: "{}"
+        description: "Optional quality gates JSON object {label: result}"
+      results-json:
+        required: false
+        type: string
+        default: "{}"
+      dry-run:
+        required: false
+        type: boolean
+        default: false
+      system1-result:
+        required: false
+        type: string
+        default: ""
+      system2-result:
+        required: false
+        type: string
+        default: ""
+      system3-result:
+        required: false
+        type: string
+        default: ""
+      tests-status:
+        required: false
+        type: string
+        default: ""
+      lint-status:
+        required: false
+        type: string
+        default: ""
+      security-status:
+        required: false
+        type: string
+        default: ""
+      sonar-status:
+        required: false
+        type: string
+        default: ""
+      playwright-status:
+        required: false
+        type: string
+        default: ""
+      grafana-status:
+        required: false
+        type: string
+        default: ""
+      pipeline-result:
+        required: false
+        type: string
+        default: ""
+    secrets:
+      PR_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    name: "Create Promotion PR"
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Validate PAT for PR creation
+        env:
+          PR_TOKEN: ${{ secrets.PR_TOKEN }}
+        run: |
+          if [ -z "${PR_TOKEN}" ]; then
+            echo "âŒ Missing PAT secret for PR creation."
+            echo "Provide PR_TOKEN when calling this workflow."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PR_TOKEN }}
+
+      - name: Create promotion PR
+        env:
+          GH_TOKEN: ${{ secrets.PR_TOKEN }}
+          PIPELINE_KIND: ${{ inputs.pipeline-kind }}
+          DIRECTION: ${{ inputs.direction }}
+          SYSTEM1_NAME: ${{ inputs.system1-name }}
+          SYSTEM1_URL: ${{ inputs.system1-url }}
+          SYSTEM2_NAME: ${{ inputs.system2-name }}
+          SYSTEM2_URL: ${{ inputs.system2-url }}
+          SYSTEM3_NAME: ${{ inputs.system3-name }}
+          SYSTEM3_URL: ${{ inputs.system3-url }}
+          SYSTEM1_RESULT: ${{ inputs.system1-result }}
+          SYSTEM2_RESULT: ${{ inputs.system2-result }}
+          SYSTEM3_RESULT: ${{ inputs.system3-result }}
+          SYSTEMS_JSON_INPUT: ${{ inputs.systems-json }}
+          DEPLOYMENT_URLS_JSON_INPUT: ${{ inputs.deployment-urls-json }}
+          ARTIFACT_KIND_INPUT: ${{ inputs.artifact-kind }}
+          ARTIFACT_LINKS_JSON_INPUT: ${{ inputs.artifact-links-json }}
+          QUALITY_GATES_JSON_INPUT: ${{ inputs.quality-gates-json }}
+          RESULTS_JSON_INPUT: ${{ inputs.results-json }}
+          VERSION_TAG_INPUT: ${{ inputs.version-tag }}
+          VERSIONS_JSON_INPUT: ${{ inputs.versions-json }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          TESTS_STATUS_INPUT: ${{ inputs.tests-status }}
+          LINT_STATUS_INPUT: ${{ inputs.lint-status }}
+          SECURITY_STATUS_INPUT: ${{ inputs.security-status }}
+          SONAR_STATUS_INPUT: ${{ inputs.sonar-status }}
+          PLAYWRIGHT_STATUS_INPUT: ${{ inputs.playwright-status }}
+          GRAFANA_STATUS_INPUT: ${{ inputs.grafana-status }}
+          PIPELINE_RESULT_INPUT: ${{ inputs.pipeline-result }}
+        run: |
+          retry() {
+            local attempts=$1
+            local delay=$2
+            shift 2
+            local count=1
+            until "$@"; do
+              if [ "$count" -ge "$attempts" ]; then
+                return 1
+              fi
+              sleep "$delay"
+              count=$((count + 1))
+            done
+          }
+
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
+          VERSION_TAG="${VERSION_TAG_INPUT}"
+
+          if [ "${DIRECTION}" = "test-to-uat" ]; then
+            SOURCE_BRANCH="test"
+            TARGET_BRANCH="uat"
+            TITLE="ðŸš€ Release: Promote TEST â†’ UAT (${SHORT_SHA})"
+            HEADER="## ðŸš€ Promote TEST â†’ UAT"
+            CONTEXT_LABEL="TEST"
+            FOOTER="*Merge this PR to continue promotion into UAT.*"
+            INTRO="This PR was **automatically created** after the required CI quality gates and promotion checks passed on the ${BT}test${BT} branch."
+
+            if [ "${PIPELINE_KIND}" = "single" ] && { [ -z "${VERSION_TAG}" ] || [ "${VERSION_TAG}" = "test-v" ]; }; then
+              VERSION_TAG=$(git tag -l 'test-v*' | grep -E '^test-v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+            fi
+            if [ "${PIPELINE_KIND}" = "single" ] && [ -z "${VERSION_TAG}" ]; then
+              echo "âš ï¸ Unable to resolve TEST version tag for PR body; falling back to per-system versions or N/A."
+            fi
+          elif [ "${DIRECTION}" = "uat-to-main" ]; then
+            SOURCE_BRANCH="uat"
+            TARGET_BRANCH="main"
+            TITLE="ðŸš€ Release: Promote UAT â†’ Production (${SHORT_SHA})"
+            HEADER="## ðŸš€ Promote UAT â†’ Production"
+            CONTEXT_LABEL="UAT"
+            FOOTER="*Merge this PR to continue promotion into production. A production readiness gate will run automatically.*"
+            INTRO="This PR was **automatically created** after the required CI quality gates and promotion checks passed on the ${BT}uat${BT} branch."
+
+            if [ "${PIPELINE_KIND}" = "single" ] && [ -z "${VERSION_TAG}" ]; then
+              VERSION_TAG=$(git tag -l 'uat-v*' | grep -E '^uat-v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+            fi
+            if [ "${PIPELINE_KIND}" = "single" ] && [ -z "${VERSION_TAG}" ]; then
+              VERSION_TAG=$(git tag -l 'test-v*' | grep -E '^test-v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+            fi
+          else
+            echo "âŒ Invalid direction: ${DIRECTION}. Expected test-to-uat or uat-to-main."
+            exit 1
+          fi
+
+          ARTIFACT_KIND="${ARTIFACT_KIND_INPUT}"
+          if [ -z "${ARTIFACT_KIND}" ]; then
+            ARTIFACT_KIND="deployment"
+          fi
+
+          if [ "${ARTIFACT_KIND}" = "release" ]; then
+            LINKS_SECTION_TITLE="### ðŸ“¦ GitHub ${CONTEXT_LABEL} Release Links"
+            LINKS_COLUMN_HEADER="${CONTEXT_LABEL} Release Link"
+            LINKS_ACTION_TEXT="View release"
+            REVIEW_LINK_STEP="2. Open each **Release Link** and verify the published artifacts"
+            CHECKLIST_TEMPLATE="Verified **%s** release assets on ${CONTEXT_LABEL}"
+          else
+            LINKS_SECTION_TITLE="### ðŸ”— ${CONTEXT_LABEL} Deployment Links"
+            LINKS_COLUMN_HEADER="${CONTEXT_LABEL} Deployment Link"
+            LINKS_ACTION_TEXT="Open link"
+            REVIEW_LINK_STEP="2. Open each **Deployment Link** and verify the relevant behavior for that system"
+            CHECKLIST_TEMPLATE="Verified **%s** deployment on ${CONTEXT_LABEL}"
+          fi
+
+          COMPARE_URL="${{ github.server_url }}/${{ github.repository }}/compare/${TARGET_BRANCH}...${SOURCE_BRANCH}"
+
+          EXISTING_PR=$(gh pr list --base "${TARGET_BRANCH}" --head "${SOURCE_BRANCH}" --state open --json number --jq '.[0].number' 2>/dev/null || true)
+
+          if [ -n "${SYSTEMS_JSON_INPUT}" ]; then
+            SYSTEMS_JSON="${SYSTEMS_JSON_INPUT}"
+          else
+            SYSTEMS_JSON=$(jq -nc \
+              --arg n1 "${SYSTEM1_NAME}" \
+              --arg n2 "${SYSTEM2_NAME}" \
+              --arg n3 "${SYSTEM3_NAME}" \
+              '[
+                {name:$n1},
+                {name:$n2},
+                {name:$n3}
+              ] | map(select(.name != ""))')
+          fi
+
+          if ! echo "${SYSTEMS_JSON}" | jq -e . >/dev/null 2>&1; then
+            echo "âŒ Invalid systems-json payload."
+            exit 1
+          fi
+
+          if [ "$(echo "${SYSTEMS_JSON}" | jq 'length')" -eq 0 ]; then
+            echo "âŒ No systems provided for promotion PR body."
+            exit 1
+          fi
+
+          if [ -n "${DEPLOYMENT_URLS_JSON_INPUT}" ] && echo "${DEPLOYMENT_URLS_JSON_INPUT}" | jq -e . >/dev/null 2>&1 && [ "$(echo "${DEPLOYMENT_URLS_JSON_INPUT}" | jq 'length')" -gt 0 ]; then
+            DEPLOYMENT_URLS_JSON="${DEPLOYMENT_URLS_JSON_INPUT}"
+          else
+            DEPLOYMENT_URLS_JSON=$(jq -nc \
+              --arg n1 "${SYSTEM1_NAME}" --arg u1 "${SYSTEM1_URL}" \
+              --arg n2 "${SYSTEM2_NAME}" --arg u2 "${SYSTEM2_URL}" \
+              --arg n3 "${SYSTEM3_NAME}" --arg u3 "${SYSTEM3_URL}" \
+              '{($n1):$u1, ($n2):$u2, ($n3):$u3}')
+
+            if [ "$(echo "${DEPLOYMENT_URLS_JSON}" | jq '[to_entries[] | select(.key != "" and .value != "")] | length')" -eq 0 ]; then
+              RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              DEPLOYMENT_URLS_JSON=$(echo "${SYSTEMS_JSON}" | jq -c --arg runUrl "${RUN_URL}" 'reduce .[] as $s ({}; .[$s.name] = $runUrl)')
+            fi
+          fi
+
+          if [ -n "${ARTIFACT_LINKS_JSON_INPUT}" ] && echo "${ARTIFACT_LINKS_JSON_INPUT}" | jq -e . >/dev/null 2>&1 && [ "$(echo "${ARTIFACT_LINKS_JSON_INPUT}" | jq 'length')" -gt 0 ]; then
+            ARTIFACT_LINKS_JSON="${ARTIFACT_LINKS_JSON_INPUT}"
+          else
+            ARTIFACT_LINKS_JSON="${DEPLOYMENT_URLS_JSON}"
+          fi
+
+          if [ -n "${RESULTS_JSON_INPUT}" ] && echo "${RESULTS_JSON_INPUT}" | jq -e . >/dev/null 2>&1 && [ "$(echo "${RESULTS_JSON_INPUT}" | jq 'length')" -gt 0 ]; then
+            RESULTS_JSON="${RESULTS_JSON_INPUT}"
+          else
+            RESULTS_JSON=$(jq -nc \
+              --arg n1 "${SYSTEM1_NAME}" --arg r1 "${SYSTEM1_RESULT}" \
+              --arg n2 "${SYSTEM2_NAME}" --arg r2 "${SYSTEM2_RESULT}" \
+              --arg n3 "${SYSTEM3_NAME}" --arg r3 "${SYSTEM3_RESULT}" \
+              '{($n1):$r1, ($n2):$r2, ($n3):$r3}')
+
+            if [ "$(echo "${RESULTS_JSON}" | jq '[to_entries[] | select(.key != "" and .value != "")] | length')" -eq 0 ]; then
+              DEFAULT_RESULT="${SYSTEM1_RESULT}"
+              if [ -z "${DEFAULT_RESULT}" ]; then
+                DEFAULT_RESULT="success"
+              fi
+              RESULTS_JSON=$(echo "${SYSTEMS_JSON}" | jq -c --arg value "${DEFAULT_RESULT}" 'reduce .[] as $s ({}; .[$s.name] = $value)')
+            fi
+          fi
+
+          if [ -n "${VERSIONS_JSON_INPUT}" ] && echo "${VERSIONS_JSON_INPUT}" | jq -e . >/dev/null 2>&1 && [ "$(echo "${VERSIONS_JSON_INPUT}" | jq 'length')" -gt 0 ]; then
+            VERSIONS_JSON="${VERSIONS_JSON_INPUT}"
+          else
+            VERSIONS_JSON=$(echo "${SYSTEMS_JSON}" | jq -c --arg version "${VERSION_TAG}" 'reduce .[] as $s ({}; .[$s.name] = $version)')
+          fi
+
+          if [ -n "${QUALITY_GATES_JSON_INPUT}" ] && echo "${QUALITY_GATES_JSON_INPUT}" | jq -e . >/dev/null 2>&1 && [ "$(echo "${QUALITY_GATES_JSON_INPUT}" | jq 'length')" -gt 0 ]; then
+            QUALITY_GATES_JSON="${QUALITY_GATES_JSON_INPUT}"
+          else
+            QUALITY_GATES_JSON='{}'
+          fi
+
+            if [ "${PIPELINE_KIND}" = "single" ]; then
+              if [ -z "${SYSTEM1_NAME}" ]; then
+                echo "âŒ system1-name is required for single pipeline-kind."
+                exit 1
+              fi
+              SYSTEMS_JSON=$(jq -nc --arg n1 "${SYSTEM1_NAME}" '[{name:$n1}]')
+            fi
+
+            RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            DEFAULT_RESULT="${SYSTEM1_RESULT}"
+            if [ -z "${DEFAULT_RESULT}" ]; then
+              DEFAULT_RESULT="success"
+            fi
+
+            TESTS_STATUS="${TESTS_STATUS_INPUT}"
+            LINT_STATUS="${LINT_STATUS_INPUT}"
+            SECURITY_STATUS="${SECURITY_STATUS_INPUT}"
+            SONAR_STATUS="${SONAR_STATUS_INPUT}"
+            PLAYWRIGHT_STATUS="${PLAYWRIGHT_STATUS_INPUT}"
+            GRAFANA_STATUS="${GRAFANA_STATUS_INPUT}"
+            PIPELINE_RESULT="${PIPELINE_RESULT_INPUT}"
+
+            TESTS_STATUS_RAW="${TESTS_STATUS_INPUT}"
+            LINT_STATUS_RAW="${LINT_STATUS_INPUT}"
+            SECURITY_STATUS_RAW="${SECURITY_STATUS_INPUT}"
+            SONAR_STATUS_RAW="${SONAR_STATUS_INPUT}"
+            PLAYWRIGHT_STATUS_RAW="${PLAYWRIGHT_STATUS_INPUT}"
+            GRAFANA_STATUS_RAW="${GRAFANA_STATUS_INPUT}"
+
+            if [ -z "${TESTS_STATUS}" ]; then TESTS_STATUS="${DEFAULT_RESULT}"; fi
+            if [ -z "${LINT_STATUS}" ]; then LINT_STATUS="${DEFAULT_RESULT}"; fi
+            if [ -z "${SECURITY_STATUS}" ]; then SECURITY_STATUS="${DEFAULT_RESULT}"; fi
+            if [ -z "${SONAR_STATUS}" ]; then SONAR_STATUS="${DEFAULT_RESULT}"; fi
+            if [ -z "${PLAYWRIGHT_STATUS}" ]; then PLAYWRIGHT_STATUS="${DEFAULT_RESULT}"; fi
+            if [ -z "${GRAFANA_STATUS}" ]; then GRAFANA_STATUS="${DEFAULT_RESULT}"; fi
+            if [ -z "${PIPELINE_RESULT}" ]; then PIPELINE_RESULT="${DEFAULT_RESULT}"; fi
+
+            if [ "$(echo "${QUALITY_GATES_JSON}" | jq 'length')" -eq 0 ]; then
+              QUALITY_GATES_JSON=$(jq -nc \
+                --arg tests "${TESTS_STATUS_RAW}" \
+                --arg lint "${LINT_STATUS_RAW}" \
+                --arg security "${SECURITY_STATUS_RAW}" \
+                --arg sonar "${SONAR_STATUS_RAW}" \
+                --arg playwright "${PLAYWRIGHT_STATUS_RAW}" \
+                --arg grafana "${GRAFANA_STATUS_RAW}" \
+                '({}
+                  + (if ($tests | length) > 0 then {"Tests": $tests} else {} end)
+                  + (if ($lint | length) > 0 then {"Lint": $lint} else {} end)
+                  + (if ($security | length) > 0 then {"Security": $security} else {} end)
+                  + (if ($sonar | length) > 0 then {"SonarCloud": $sonar} else {} end)
+                  + (if ($playwright | length) > 0 then {"Playwright E2E": $playwright} else {} end)
+                  + (if ($grafana | length) > 0 then {"Grafana k6": $grafana} else {} end)
+                )')
+
+              if [ "$(echo "${QUALITY_GATES_JSON}" | jq 'length')" -eq 0 ]; then
+                QUALITY_GATES_JSON=$(jq -nc --arg pipeline "${PIPELINE_RESULT}" '{"Pipeline": (if ($pipeline | length) > 0 then $pipeline else "unknown" end)}')
+              fi
+            fi
+
+          # â”€â”€ Backtick variable (avoids YAML/bash/jq escape issues) â”€â”€
+          BT='`'
+
+          # â”€â”€ Status icon helper â”€â”€
+          status_icon() {
+            case "$1" in
+              success) echo "âœ…";;
+              failure) echo "âŒ";;
+              cancelled) echo "âš ï¸";;
+              skipped) echo "â­ï¸";;
+              *) echo "â¬œ";;
+            esac
+          }
+
+          # â”€â”€ Compute readiness badge â”€â”€
+          ALL_GATES_PASSED="true"
+          if [ "$(echo "${QUALITY_GATES_JSON}" | jq 'length')" -gt 0 ]; then
+            while IFS= read -r _gate; do
+              if [ -z "${_gate}" ]; then
+                continue
+              fi
+              if [ "${_gate}" != "success" ] && [ "${_gate}" != "skipped" ]; then
+                ALL_GATES_PASSED="false"
+                break
+              fi
+            done < <(echo "${QUALITY_GATES_JSON}" | jq -r '.[]')
+          else
+            for _gate in "${TESTS_STATUS}" "${LINT_STATUS}" "${SECURITY_STATUS}" "${SONAR_STATUS}" "${PLAYWRIGHT_STATUS}" "${GRAFANA_STATUS}"; do
+              if [ "${_gate}" != "success" ] && [ "${_gate}" != "skipped" ]; then
+                ALL_GATES_PASSED="false"
+                break
+              fi
+            done
+          fi
+          if [ "${ALL_GATES_PASSED}" = "true" ] && [ "${PIPELINE_RESULT}" = "success" ]; then
+            READINESS_BADGE="> ðŸŸ¢ **READY FOR REVIEW** â€” All quality gates passed"
+          else
+            READINESS_BADGE="> ðŸ”´ **NOT READY** â€” One or more quality gates failed"
+          fi
+
+            ARTIFACT_LINKS_JSON=$(echo "${SYSTEMS_JSON}" | jq -c --argjson urls "${ARTIFACT_LINKS_JSON}" --arg runUrl "${RUN_URL}" '
+              reduce .[] as $s ({};
+                .[$s.name] = ((($urls[$s.name] // "") | tostring) | if length > 0 then . else $runUrl end)
+              )')
+
+            RESULTS_JSON=$(echo "${SYSTEMS_JSON}" | jq -c --argjson results "${RESULTS_JSON}" --arg defaultResult "${DEFAULT_RESULT}" '
+              reduce .[] as $s ({};
+                .[$s.name] = ((($results[$s.name] // "") | tostring) | if length > 0 then . else $defaultResult end)
+              )')
+
+            VERSIONS_JSON=$(echo "${SYSTEMS_JSON}" | jq -c --argjson versions "${VERSIONS_JSON}" --arg defaultVersion "${VERSION_TAG}" '
+              reduce .[] as $s ({};
+                .[$s.name] = ((($versions[$s.name] // "") | tostring) | if length > 0 then . else (if ($defaultVersion | length) > 0 then $defaultVersion else "N/A" end) end)
+              )')
+
+          # â”€â”€ Pre-merge checklist â”€â”€
+          CHECKLIST="- [ ] Reviewed the [changes between branches](${COMPARE_URL})"
+          while IFS= read -r SYSTEM_NAME; do
+            if [ -z "${SYSTEM_NAME}" ]; then
+              continue
+            fi
+            CHECKLIST+=$'\n'"- [ ] $(printf "${CHECKLIST_TEMPLATE}" "${SYSTEM_NAME}")"
+          done < <(echo "${SYSTEMS_JSON}" | jq -r '.[].name')
+          if [ "${DIRECTION}" = "test-to-uat" ]; then
+            CHECKLIST+=$'\n- [ ] Ready for UAT validation'
+          else
+            CHECKLIST+=$'\n- [ ] All acceptance criteria met'
+            CHECKLIST+=$'\n- [ ] Production readiness confirmed'
+          fi
+
+          # â”€â”€ Deployment links table rows â”€â”€
+          ROWS=$(echo "${SYSTEMS_JSON}" | jq -r --argjson urls "${ARTIFACT_LINKS_JSON}" --arg runUrl "${RUN_URL}" --arg linkText "${LINKS_ACTION_TEXT}" '
+            .[]
+            | (($urls[.name] // "") | tostring) as $raw
+            | (if ($raw | length) > 0 then $raw else $runUrl end) as $url
+            | "| \(.name) | [ðŸ”— " + $linkText + "](" + $url + ") |"
+          ')
+
+          # â”€â”€ Quality gates table with emoji â”€â”€
+          QUALITY_GATE_ROWS=$(echo "${QUALITY_GATES_JSON}" | jq -r --arg bt "${BT}" '
+            to_entries
+            | map(
+                "| " + .key + " | " +
+                (if .value == "success" then "âœ…" elif .value == "failure" then "âŒ" elif .value == "cancelled" then "âš ï¸" elif .value == "skipped" then "â­ï¸" else "â¬œ" end) +
+                " | " + $bt + (.value | tostring) + $bt + " |"
+              )
+            | join("\n")
+          ')
+          QUALITY_GATES=$(printf -- "| Gate | | Result |\n|------|---|--------|\n%s" "${QUALITY_GATE_ROWS}")
+
+          # â”€â”€ Version tags table â”€â”€
+          VERSION_ROWS=$(echo "${SYSTEMS_JSON}" | jq -r --argjson versions "${VERSIONS_JSON}" --arg bt "${BT}" '.[] | "| " + .name + " | " + $bt + ((($versions[.name] // "") | tostring) | if length > 0 then . else "N/A" end) + $bt + " |"')
+
+          # â”€â”€ CI results table â”€â”€
+          EVIDENCE_ROWS=$(echo "${SYSTEMS_JSON}" | jq -r --argjson results "${RESULTS_JSON}" --arg defaultResult "${DEFAULT_RESULT}" --arg bt "${BT}" '.[] | "| \(.name) | " + $bt + ((($results[.name] // "") | tostring) | if length > 0 then . else $defaultResult end) + $bt + " |"')
+
+          # â”€â”€ Release summary â”€â”€
+          RELEASE_VERSION_VALUE="${VERSION_TAG:-N/A}"
+          if [ "${PIPELINE_KIND}" = "multi" ]; then
+            RELEASE_VERSION_VALUE="Per-system (see Version Tags)"
+          fi
+          PIPELINE_ICON=$(status_icon "${PIPELINE_RESULT}")
+          RELEASE_SUMMARY=$(printf -- "| Metric | Value |\n|--------|-------|\n| Pipeline Result | %s ${BT}%s${BT} |\n| Version Tag | ${BT}%s${BT} |\n| Short SHA | [${BT}%s${BT}](https://github.com/${{ github.repository }}/commit/%s) |\n| Compare | [View changes â†—](%s) |" \
+            "${PIPELINE_ICON}" "${PIPELINE_RESULT}" \
+            "${RELEASE_VERSION_VALUE}" \
+            "${SHORT_SHA}" "${GITHUB_SHA}" \
+            "${COMPARE_URL}")
+
+          # â”€â”€ Details section â”€â”€
+          DETAILS=$(printf -- "- **Source branch:** ${BT}%s${BT}\n- **Target branch:** ${BT}%s${BT}" "${SOURCE_BRANCH}" "${TARGET_BRANCH}")
+          if [ "${PIPELINE_KIND}" = "multi" ]; then
+            VERSION_DETAILS=$(echo "${SYSTEMS_JSON}" | jq -r --argjson versions "${VERSIONS_JSON}" --arg bt "${BT}" '.[] | "  - **" + .name + "**: " + $bt + (((($versions[.name] // "") | tostring) | if length > 0 then . else "N/A" end)) + $bt')
+            DETAILS=$(printf "%s\n- **Version tags per system:**\n%s" "${DETAILS}" "${VERSION_DETAILS}")
+          else
+            DETAILS=$(printf "%s\n- **Version tag:** ${BT}%s${BT}" "${DETAILS}" "${VERSION_TAG:-N/A}")
+          fi
+          TRIGGERED_BY="${GITHUB_TRIGGERING_ACTOR:-${GITHUB_ACTOR}}"
+          DETAILS=$(printf "%s\n- **Commit:** [\`%s\`](https://github.com/${{ github.repository }}/commit/%s)\n- **Compare:** [View changes â†—](%s)\n- **Triggered by:** @%s\n- **Triggered at:** %s\n- **Pipeline run:** [View workflow run â†—](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})" "${DETAILS}" "${SHORT_SHA}" "${GITHUB_SHA}" "${COMPARE_URL}" "${TRIGGERED_BY}" "${TIMESTAMP}")
+
+          # â”€â”€ How to review section â”€â”€
+          HOW_TO_REVIEW="1. Check the **Quality Gates** table â€” all gates should show âœ…"
+          HOW_TO_REVIEW+=$'\n'"${REVIEW_LINK_STEP}"
+          HOW_TO_REVIEW+=$'\n'"3. Review the [code diff between branches](${COMPARE_URL})"
+          HOW_TO_REVIEW+=$'\n'"4. Complete all items in the **Pre-merge Checklist** above"
+
+          # â”€â”€ Assemble PR body â”€â”€
+          PR_BODY=$(cat <<ENDOFBODY
+          ${HEADER}
+
+          ${READINESS_BADGE}
+
+          ${INTRO}
+
+          ---
+
+          ### ðŸ›¡ï¸ Quality Gates
+          ${QUALITY_GATES}
+
+          ### ðŸ“‹ Pre-merge Checklist
+          ${CHECKLIST}
+
+          ${LINKS_SECTION_TITLE}
+          | System | ${LINKS_COLUMN_HEADER} |
+          |--------|------------------|
+          ${ROWS}
+
+          ### ðŸ·ï¸ Version Tags
+          | System | Tag |
+          |--------|-----|
+          ${VERSION_ROWS}
+
+          ### ðŸ“Š CI Results
+          | System | Result |
+          |--------|--------|
+          ${EVIDENCE_ROWS}
+
+          ### ðŸ§¾ Release Summary
+          ${RELEASE_SUMMARY}
+
+          ### ðŸ” Details
+          <details>
+          <summary>Click to expand pipeline details</summary>
+
+          ${DETAILS}
+
+          </details>
+
+          ### ðŸ“– How to Review
+          ${HOW_TO_REVIEW}
+
+          ---
+          ${FOOTER}
+          ENDOFBODY
+          )
+
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "ðŸ§ª Dry run enabled. PR body preview:"
+            echo "${PR_BODY}"
+            exit 0
+          fi
+
+          if [ -n "${EXISTING_PR}" ]; then
+            retry 3 3 gh pr edit "${EXISTING_PR}" --title "${TITLE}" --body "${PR_BODY}"
+            echo "âœ… Updated PR #${EXISTING_PR}: ${SOURCE_BRANCH} â†’ ${TARGET_BRANCH}"
+            exit 0
+          fi
+
+          # Skip no-op promotions when source has no commits ahead of target.
+          if ! git rev-parse --verify "origin/${SOURCE_BRANCH}" >/dev/null 2>&1 || ! git rev-parse --verify "origin/${TARGET_BRANCH}" >/dev/null 2>&1; then
+            git fetch --no-tags origin "${SOURCE_BRANCH}" "${TARGET_BRANCH}" >/dev/null 2>&1 || true
+          fi
+
+          AHEAD_COUNT=$(git rev-list --count "origin/${TARGET_BRANCH}..origin/${SOURCE_BRANCH}" 2>/dev/null || git rev-list --count "${TARGET_BRANCH}..${SOURCE_BRANCH}" 2>/dev/null || echo "0")
+          if [ "${AHEAD_COUNT}" = "0" ]; then
+            echo "â„¹ï¸ No commits between ${TARGET_BRANCH} and ${SOURCE_BRANCH}; skipping PR creation."
+            exit 0
+          fi
+
+          retry 3 3 gh pr create --base "${TARGET_BRANCH}" --head "${SOURCE_BRANCH}" --title "${TITLE}" --body "${PR_BODY}"
+          echo "âœ… Created PR: ${SOURCE_BRANCH} â†’ ${TARGET_BRANCH}"
+
+

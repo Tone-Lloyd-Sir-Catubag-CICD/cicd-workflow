@@ -1,0 +1,152 @@
+﻿# Contract: docs/workflows/security-scan.md
+# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+# â•‘  REUSABLE: Security Scanning                                   â•‘
+# â•‘  Dependency audit + license compliance                        â•‘
+# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+name: "Reusable: Security Scan"
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        required: false
+        type: string
+        default: "."
+        description: "Project directory"
+      system-name:
+        required: true
+        type: string
+        description: "System name for artifacts/display"
+      node-version:
+        required: false
+        type: number
+        default: 24
+        description: "Node.js version"
+      fail-on-high:
+        required: false
+        type: boolean
+        default: true
+        description: "Fail pipeline on HIGH severity vulnerabilities"
+    outputs:
+      audit-result:
+        description: "npm audit result"
+        value: ${{ jobs.dependency-audit.outputs.result }}
+
+
+permissions:
+  contents: read
+
+jobs:
+  # â”€â”€ Dependency Vulnerability Audit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  dependency-audit:
+    name: "Dependency Audit"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      result: ${{ steps.audit.outcome }}
+    defaults:
+      run:
+        working-directory: ./${{ inputs.working-directory }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Install Dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run npm audit
+        id: audit
+        env:
+          FAIL_ON_HIGH: ${{ inputs.fail-on-high }}
+        run: |
+          echo "ðŸ” Running dependency audit..."
+          npm audit --json > audit-report.json 2>&1 || true
+          npm audit --audit-level=high 2>&1 || AUDIT_EXIT=$?
+
+          if [ "${AUDIT_EXIT:-0}" -ne 0 ] && [ "${FAIL_ON_HIGH}" = "true" ]; then
+            echo "âŒ HIGH/CRITICAL vulnerabilities found"
+            npm audit --audit-level=high 2>&1
+            exit 1
+          fi
+          echo "âœ… No HIGH/CRITICAL vulnerabilities"
+
+      - name: Summarise Audit Results
+        if: always()
+        run: |
+          if [ ! -f "audit-report.json" ]; then
+            echo "âš ï¸ audit-report.json not found â€” skipping summary."
+            exit 0
+          fi
+
+          if ! jq -e '.vulnerabilities' audit-report.json >/dev/null 2>&1; then
+            echo "âš ï¸ Audit report has no vulnerabilities key â€” may be an older npm format."
+            cat audit-report.json | head -60
+            exit 0
+          fi
+
+          TOTAL=$(jq '[.vulnerabilities | to_entries[].value.severity] | length' audit-report.json)
+          CRITICAL=$(jq '[.vulnerabilities | to_entries[].value | select(.severity=="critical")] | length' audit-report.json)
+          HIGH=$(jq '[.vulnerabilities | to_entries[].value | select(.severity=="high")] | length' audit-report.json)
+          MODERATE=$(jq '[.vulnerabilities | to_entries[].value | select(.severity=="moderate")] | length' audit-report.json)
+          LOW=$(jq '[.vulnerabilities | to_entries[].value | select(.severity=="low")] | length' audit-report.json)
+          INFO=$(jq '[.vulnerabilities | to_entries[].value | select(.severity=="info")] | length' audit-report.json)
+
+          echo "â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—"
+          echo "â•‘          DEPENDENCY AUDIT SUMMARY                    â•‘"
+          echo "â• â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•£"
+          echo "â•‘ Total vulnerabilities:  ${TOTAL}                     â•‘"
+          echo "â•‘   Critical:            ${CRITICAL}                   â•‘"
+          echo "â•‘   High:                ${HIGH}                       â•‘"
+          echo "â•‘   Moderate:            ${MODERATE}                   â•‘"
+          echo "â•‘   Low:                 ${LOW}                        â•‘"
+          echo "â•‘   Info:                ${INFO}                       â•‘"
+          echo "â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
+
+          if [ "${CRITICAL}" -gt 0 ] || [ "${HIGH}" -gt 0 ]; then
+            echo ""
+            echo "ðŸ”´ Packages with HIGH/CRITICAL vulnerabilities:"
+            jq -r '.vulnerabilities | to_entries[] | select(.value.severity == "critical" or .value.severity == "high") | "  â€¢ \(.key) (\(.value.severity)) â€” via \(.value.via | if type == "array" then map(if type == "string" then . else .title // .url // "direct" end) | join(", ") else . end)"' audit-report.json
+          fi
+
+      - name: Upload Audit Report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.system-name }}-audit-report
+          path: ${{ inputs.working-directory }}/audit-report.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+  # â”€â”€ License Compliance â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  license-check:
+    name: "License Compliance"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ./${{ inputs.working-directory }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Install Dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Check Licenses
+        run: |
+          npx license-checker --production --excludePrivatePackages --onlyAllow \
+            "MIT;ISC;BSD-2-Clause;BSD-3-Clause;Apache-2.0;Apache 2.0;0BSD;CC0-1.0;CC-BY-3.0;CC-BY-4.0;MPL-2.0;Unlicense;Python-2.0;BlueOak-1.0.0;LGPL-3.0-or-later;(Apache-2.0 AND LGPL-3.0-or-later);(BSD-2-Clause OR MIT OR Apache-2.0);(BSD-3-Clause OR GPL-2.0);(MIT OR CC0-1.0)" \
+            --summary
+          echo "âœ… All licenses are compliant"
+
+

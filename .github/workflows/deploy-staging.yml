@@ -1,0 +1,183 @@
+﻿# Contract: docs/workflows/deploy-staging.md
+# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+# â•‘  REUSABLE: Deploy to Environment                               â•‘
+# â•‘  Supports web (Vercel), API (container), and mobile (APK)     â•‘
+# â•‘  Deploys to: test | uat | prod (staging/preprod)              â•‘
+# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+name: "Reusable: Deploy to Environment"
+
+on:
+  workflow_call:
+    inputs:
+      system-dir:
+        required: false
+        type: string
+        default: "."
+        description: "System directory name"
+      system-name:
+        required: true
+        type: string
+        description: "System name for artifacts/display"
+      app-type:
+        required: true
+        type: string
+        description: "Application type (web|api|mobile)"
+      artifact-name:
+        required: true
+        type: string
+        description: "Artifact name to download"
+      deploy-environment:
+        required: false
+        type: string
+        default: "uat"
+        description: "Target environment (test|uat|prod)"
+      staging-url:
+        required: false
+        type: string
+        default: ""
+        description: "Expected URL for health check"
+      enable-health-check:
+        required: false
+        type: boolean
+        default: true
+        description: "Run post-deploy health check"
+    outputs:
+      deployment-url:
+        description: "Deployment URL"
+        value: ${{ jobs.deploy.outputs.url }}
+      deployment-status:
+        description: "Deployment status"
+        value: ${{ jobs.deploy.outputs.status }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ inputs.deploy-environment }}-${{ inputs.system-name }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: "Deploy to ${{ inputs.deploy-environment }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment:
+      name: ${{ inputs.deploy-environment }}
+      url: ${{ steps.deploy.outputs.url }}
+    outputs:
+      url: ${{ steps.deploy.outputs.url }}
+      status: ${{ steps.deploy.outputs.status }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Download Build Artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ./build
+
+      - name: Deploy to ${{ inputs.deploy-environment }}
+        id: deploy
+        run: |
+          echo "â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—"
+          echo "â•‘   DEPLOYMENT â€” ${{ inputs.deploy-environment }}                       â•‘"
+          echo "â• â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•£"
+          echo "â•‘ System:      ${{ inputs.system-name }}"
+          echo "â•‘ Type:        ${{ inputs.app-type }}"
+          echo "â•‘ Environment: ${{ inputs.deploy-environment }}"
+          echo "â•‘ Branch:      ${{ github.ref_name }}"
+          echo "â•‘ Commit:      ${{ github.sha }}"
+          echo "â•‘ Timestamp:   $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
+
+          ENV="${{ inputs.deploy-environment }}"
+          APP_TYPE="${{ inputs.app-type }}"
+
+          # Validate supported app type
+          case "${APP_TYPE}" in
+            web|api|mobile) ;;
+            *)
+              echo "âŒ Unsupported app-type '${APP_TYPE}'. Expected: web | api | mobile"
+              exit 1
+              ;;
+          esac
+
+          # â”€â”€ Deployment routing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+          # NOTE: This workflow is a deployment scaffold. Each project must wire
+          # in its actual deployment commands via repository-level secrets and
+          # vars. The steps below validate that the necessary configuration is
+          # present before proceeding.
+          #
+          # Required secrets / vars per app-type:
+          #   web    â†’ VERCEL_TOKEN, VERCEL_ORG_ID, VERCEL_PROJECT_ID (use vercel-deploy.yml)
+          #   api    â†’ configure via your container registry / cloud provider secrets
+          #   mobile â†’ handled by mobile-release-publish.yml
+          #
+          # If you are seeing this message in a pipeline run, it means this
+          # reusable workflow was invoked without a project-specific deployment
+          # implementation. Replace this step with your actual deploy commands.
+
+          case "${APP_TYPE}" in
+            web)
+              echo "ðŸŒ Web deployments should use the vercel-deploy.yml reusable workflow."
+              echo "âŒ No web deployment command configured in deploy-staging.yml."
+              echo "   Invoke .github/workflows/vercel-deploy.yml directly from your pipeline instead."
+              exit 1
+              ;;
+            api)
+              echo "â­ï¸  Backend API staging deployment skipped â€” not yet configured."
+              echo "   Add real deployment commands (e.g. kubectl, docker push, cloud CLI) here when ready."
+              exit 0
+              ;;
+            mobile)
+              echo "ðŸ“± Mobile deployment not yet configured."
+              echo "âŒ Use mobile-release-publish.yml for APK/IPA distribution."
+              exit 1
+              ;;
+          esac
+
+      - name: Post-Deploy Health Check
+        if: ${{ inputs.enable-health-check && inputs.staging-url != '' }}
+        run: |
+          echo "ðŸ¥ Running health check on ${{ inputs.staging-url }}..."
+          for i in 1 2 3 4 5; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ inputs.staging-url }}/health" || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "âœ… Health check passed (attempt $i)"
+              exit 0
+            fi
+            echo "â³ Attempt $i: Status $STATUS â€” retrying in 10s..."
+            sleep 10
+          done
+          echo "âŒ Health check failed after 5 attempts"
+          exit 1
+
+      - name: Create Deployment Log
+        if: always()
+        run: |
+          cat << EOF > deployment-log.json
+          {
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "system": "${{ inputs.system-name }}",
+            "app_type": "${{ inputs.app-type }}",
+            "environment": "${{ inputs.deploy-environment }}",
+            "commit_sha": "${{ github.sha }}",
+            "branch": "${{ github.ref_name }}",
+            "deployed_by": "${{ github.actor }}",
+            "status": "${{ steps.deploy.outputs.status }}",
+            "url": "${{ steps.deploy.outputs.url }}",
+            "run_id": "${{ github.run_id }}"
+          }
+          EOF
+          cat deployment-log.json
+
+      - name: Upload Deployment Log
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.system-name }}-${{ inputs.deploy-environment }}-deployment-log
+          path: deployment-log.json
+          retention-days: 90
+
+

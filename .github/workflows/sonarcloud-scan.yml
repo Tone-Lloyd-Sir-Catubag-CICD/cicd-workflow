@@ -1,0 +1,140 @@
+﻿# Contract: docs/workflows/sonarcloud-scan.md
+# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+# â•‘  REUSABLE: SonarCloud Quality Gate                             â•‘
+# â•‘  Works for frontend, backend, and mobile repos                â•‘
+# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+name: "Reusable: SonarCloud Scan"
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        required: false
+        type: string
+        default: "."
+        description: "Project directory"
+      system-name:
+        required: true
+        type: string
+        description: "System name for display"
+      sources-path:
+        required: false
+        type: string
+        default: "src"
+        description: "Source code path relative to working directory"
+      tests-path:
+        required: false
+        type: string
+        default: "tests"
+        description: "Test files path relative to working directory"
+      sources-exclusions:
+        required: false
+        type: string
+        default: ""
+        description: "Comma-separated exclusions for sonar.sources (e.g. tests/**,e2e/**)"
+      coverage-report-path:
+        required: false
+        type: string
+        default: "coverage/lcov.info"
+        description: "Coverage report path relative to working directory"
+      coverage-artifact-name:
+        required: false
+        type: string
+        default: ""
+        description: "Name of coverage artifact to download (leave empty to skip)"
+      quality-gate-wait:
+        required: false
+        type: boolean
+        default: true
+        description: "Wait for SonarCloud quality gate result"
+    secrets:
+      SONAR_TOKEN:
+        required: true
+      SONAR_PROJECT_KEY:
+        required: true
+      SONAR_ORGANIZATION:
+        required: true
+    outputs:
+      quality-gate-status:
+        description: "SonarCloud quality gate status"
+        value: ${{ jobs.sonarcloud-scan.outputs.status }}
+
+permissions:
+  contents: read
+
+jobs:
+  sonarcloud-scan:
+    name: "SonarCloud Analysis"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      status: ${{ steps.quality-gate.outputs.status }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Download Coverage Report
+        if: ${{ inputs.coverage-artifact-name != '' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.coverage-artifact-name }}
+          path: ${{ inputs.working-directory }}/coverage
+
+      - name: Validate SonarCloud project access
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_ORGANIZATION: ${{ secrets.SONAR_ORGANIZATION }}
+          SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
+        run: |
+          if [ -z "${SONAR_TOKEN}" ] || [ -z "${SONAR_ORGANIZATION}" ] || [ -z "${SONAR_PROJECT_KEY}" ]; then
+            echo "âŒ SonarCloud preflight failed: one or more required secrets are empty."
+            exit 1
+          fi
+
+          RESPONSE=$(curl -sS -w "\n%{http_code}" -u "${SONAR_TOKEN}:" "https://sonarcloud.io/api/projects/search?organization=${SONAR_ORGANIZATION}&projects=${SONAR_PROJECT_KEY}")
+          HTTP_CODE=$(echo "${RESPONSE}" | tail -n 1)
+          BODY=$(echo "${RESPONSE}" | sed '$d')
+          TOTAL=$(echo "${BODY}" | jq -r '.paging.total // 0')
+
+          echo "ðŸ”Ž Sonar preflight: org='${SONAR_ORGANIZATION}', project='${SONAR_PROJECT_KEY}', http=${HTTP_CODE}, total=${TOTAL}"
+
+          if [ "${HTTP_CODE}" -ne 200 ] || [ "${TOTAL}" -lt 1 ]; then
+            echo "âŒ SonarCloud preflight failed: project not found or token has no access."
+            echo "Check SONAR_ORGANIZATION, SONAR_PROJECT_KEY, and SONAR_TOKEN permissions for this repository."
+            exit 1
+          fi
+
+          echo "âœ… SonarCloud preflight passed."
+
+      - name: Run SonarCloud Scan
+        uses: SonarSource/sonarqube-scan-action@v7
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          projectBaseDir: ${{ inputs.working-directory }}
+          args: >
+            -Dsonar.organization=${{ secrets.SONAR_ORGANIZATION }}
+            -Dsonar.projectKey=${{ secrets.SONAR_PROJECT_KEY }}
+            -Dsonar.sources=${{ inputs.sources-path }}
+            -Dsonar.tests=${{ inputs.tests-path }}
+            -Dsonar.exclusions=${{ inputs.sources-exclusions }}
+            -Dsonar.javascript.lcov.reportPaths=${{ inputs.coverage-report-path }}
+            -Dsonar.qualitygate.wait=${{ inputs.quality-gate-wait }}
+            -Dsonar.pullrequest.provider=GitHub
+            -Dsonar.pullrequest.github.repository=${{ github.repository }}
+
+      - name: Check Quality Gate
+        id: quality-gate
+        if: always()
+        run: |
+          echo "status=${{ job.status }}" >> $GITHUB_OUTPUT
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "âœ… SonarCloud Quality Gate passed"
+          else
+            echo "âŒ SonarCloud Quality Gate failed"
+          fi
+
+

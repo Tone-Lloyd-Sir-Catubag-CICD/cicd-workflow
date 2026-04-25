@@ -1,0 +1,108 @@
+﻿# Contract: docs/workflows/backend-workflow.md
+# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+# â•‘  ORCHESTRATOR: Backend CI/CD Pipeline (NestJS + TypeScript)   â•‘
+# â•‘  Composes reusable workflows: test â†’ lint â†’ security â†’ docker â•‘
+# â•‘  SonarCloud can run as a separate caller-composed workflow       â•‘
+# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+name: "Backend CI/CD Pipeline"
+
+on:
+  workflow_call:
+    inputs:
+      system-dir:
+        required: false
+        type: string
+        default: "."
+        description: "Project directory (e.g. BayaniHub-API, or '.' for root)"
+      system-name:
+        required: true
+        type: string
+        description: "System name for artifacts/display (e.g. BayaniHub-API)"
+      node-version:
+        required: false
+        type: number
+        default: 24
+        description: "Node.js version"
+      coverage-threshold:
+        required: false
+        type: number
+        default: 80
+        description: "Minimum code coverage percentage"
+      enable-lint:
+        required: false
+        type: boolean
+        default: true
+        description: "Run lint checks"
+      enable-security-scan:
+        required: false
+        type: boolean
+        default: true
+        description: "Run security scanning"
+      enable-docker-build:
+        required: false
+        type: boolean
+        default: false
+        description: "Build and push Docker image"
+      docker-image-name:
+        required: false
+        type: string
+        default: ""
+        description: "Docker image name for GHCR"
+      integration-test-command:
+        required: false
+        type: string
+        default: ""
+        description: "Integration test command (leave empty to skip)"
+
+permissions:
+  contents: read
+
+jobs:
+  # â”€â”€ Stage 1A: Unit Tests (NestJS/Jest) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  api-unit-tests:
+    name: "API â€” Unit Tests"
+    uses: ./.github/workflows/backend-tests.yml
+    with:
+      working-directory: ${{ inputs.system-dir }}
+      system-name: ${{ inputs.system-name }}
+      node-version: ${{ inputs.node-version }}
+      test-command: "npm run test:cov"
+      integration-test-command: ${{ inputs.integration-test-command }}
+      coverage-threshold: ${{ inputs.coverage-threshold }}
+
+  # â”€â”€ Stage 1B: Lint (parallel with tests) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  api-lint:
+    name: "API â€” Lint Check"
+    if: ${{ inputs.enable-lint }}
+    uses: ./.github/workflows/lint-check.yml
+    with:
+      working-directory: ${{ inputs.system-dir }}
+      system-name: ${{ inputs.system-name }}
+      node-version: ${{ inputs.node-version }}
+
+  # â”€â”€ Stage 1C: Security Scan (parallel with tests) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  api-security:
+    name: "API â€” Security Scan"
+    if: ${{ inputs.enable-security-scan }}
+    uses: ./.github/workflows/security-scan.yml
+    with:
+      working-directory: ${{ inputs.system-dir }}
+      system-name: ${{ inputs.system-name }}
+      node-version: ${{ inputs.node-version }}
+
+  # â”€â”€ Stage 2: Docker Build & Push â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  api-docker:
+    name: "API â€” Docker Build"
+    if: |
+      always() &&
+      inputs.enable-docker-build && inputs.docker-image-name != '' &&
+      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    needs: [api-unit-tests, api-lint, api-security]
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      working-directory: ${{ inputs.system-dir }}
+      image-name: ${{ inputs.docker-image-name }}
+      push-image: true
+      scan-vulnerabilities: true
+
+

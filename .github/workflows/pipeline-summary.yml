@@ -1,0 +1,141 @@
+﻿# Contract: docs/workflows/pipeline-summary.md
+name: "Reusable: Pipeline Summary"
+
+on:
+  workflow_call:
+    inputs:
+      pipeline-kind:
+        required: true
+        type: string
+        description: "single or multi"
+      system1-name:
+        required: false
+        type: string
+        default: "Frontend-Root"
+      system1-result:
+        required: false
+        type: string
+        default: ""
+      system2-name:
+        required: false
+        type: string
+        default: ""
+      system2-result:
+        required: false
+        type: string
+        default: ""
+      system3-name:
+        required: false
+        type: string
+        default: ""
+      system3-result:
+        required: false
+        type: string
+        default: ""
+      systems-json:
+        required: false
+        type: string
+        default: ""
+      results-json:
+        required: false
+        type: string
+        default: "{}"
+      overall-result:
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  summary:
+    name: "Pipeline Results"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Print Summary and Evaluate Status
+        env:
+          KIND: ${{ inputs.pipeline-kind }}
+          SYSTEM1_NAME: ${{ inputs.system1-name }}
+          SYSTEM1_RESULT: ${{ inputs.system1-result }}
+          SYSTEM2_NAME: ${{ inputs.system2-name }}
+          SYSTEM2_RESULT: ${{ inputs.system2-result }}
+          SYSTEM3_NAME: ${{ inputs.system3-name }}
+          SYSTEM3_RESULT: ${{ inputs.system3-result }}
+          SYSTEMS_JSON_INPUT: ${{ inputs.systems-json }}
+          RESULTS_JSON_INPUT: ${{ inputs.results-json }}
+          OVERALL_RESULT: ${{ inputs.overall-result }}
+        run: |
+          if [ -n "${SYSTEMS_JSON_INPUT}" ]; then
+            if ! echo "${SYSTEMS_JSON_INPUT}" | jq -e . >/dev/null 2>&1; then
+              echo "âŒ Invalid systems-json provided to pipeline-summary."
+              exit 1
+            fi
+
+            if ! echo "${RESULTS_JSON_INPUT}" | jq -e . >/dev/null 2>&1; then
+              RESULTS_JSON_INPUT='{}'
+            fi
+
+            echo "â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—"
+            echo "â•‘          MASTER PIPELINE SUMMARY                     â•‘"
+            echo "â• â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•£"
+            echo "â•‘ Repository: ${{ github.repository }}"
+            echo "â•‘ Branch:     ${{ github.ref_name }}"
+            echo "â•‘ Commit:     ${{ github.sha }}"
+            echo "â•‘ Actor:      ${{ github.actor }}"
+            echo "â•‘ Timestamp:  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "â• â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•£"
+
+            echo "${SYSTEMS_JSON_INPUT}" | jq -r --argjson results "${RESULTS_JSON_INPUT}" '.[] | "â•‘ " + .name + ":   " + ($results[.name] // "unknown")'
+            echo "â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
+
+            if [ -n "${OVERALL_RESULT}" ] && [ "${OVERALL_RESULT}" != "success" ] && [ "${OVERALL_RESULT}" != "skipped" ]; then
+              echo "âŒ Pipeline reported overall result: ${OVERALL_RESULT}"
+              exit 1
+            fi
+
+            FAILED=$(echo "${SYSTEMS_JSON_INPUT}" | jq -r --argjson results "${RESULTS_JSON_INPUT}" '[.[] | ($results[.name] // "unknown") == "failure"] | any')
+            if [ "${FAILED}" = "true" ]; then
+              echo "âŒ One or more pipelines failed!"
+              exit 1
+            fi
+
+            echo "âœ… All pipelines completed successfully!"
+            exit 0
+          fi
+
+          if [ "${KIND}" = "single" ]; then
+            echo "Repository: ${{ github.repository }}"
+            echo "Branch:     ${{ github.ref_name }}"
+            echo "${SYSTEM1_NAME}:   ${SYSTEM1_RESULT}"
+            exit 0
+          fi
+
+          echo "â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—"
+          echo "â•‘          MASTER PIPELINE SUMMARY                     â•‘"
+          echo "â• â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•£"
+          echo "â•‘ Repository: ${{ github.repository }}"
+          echo "â•‘ Branch:     ${{ github.ref_name }}"
+          echo "â•‘ Commit:     ${{ github.sha }}"
+          echo "â•‘ Actor:      ${{ github.actor }}"
+          echo "â•‘ Timestamp:  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "â• â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•£"
+          echo "â•‘ ${SYSTEM1_NAME}:   ${SYSTEM1_RESULT}"
+          [ -n "${SYSTEM2_NAME}" ] && echo "â•‘ ${SYSTEM2_NAME}:   ${SYSTEM2_RESULT}"
+          [ -n "${SYSTEM3_NAME}" ] && echo "â•‘ ${SYSTEM3_NAME}:   ${SYSTEM3_RESULT}"
+          echo "â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
+
+          FAILED=false
+          if [[ "${SYSTEM1_RESULT}" == "failure" ]]; then FAILED=true; fi
+          if [ -n "${SYSTEM2_NAME}" ] && [[ "${SYSTEM2_RESULT}" == "failure" ]]; then FAILED=true; fi
+          if [ -n "${SYSTEM3_NAME}" ] && [[ "${SYSTEM3_RESULT}" == "failure" ]]; then FAILED=true; fi
+
+          if [ "$FAILED" = "true" ]; then
+            echo "âŒ One or more pipelines failed!"
+            exit 1
+          fi
+
+          echo "âœ… All pipelines completed successfully!"
+
+

@@ -1,0 +1,200 @@
+﻿# Contract: docs/workflows/mobile-rn-ios-build.md
+name: "Reusable: Mobile React Native iOS Build"
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        required: false
+        type: string
+        default: "."
+        description: "Project directory"
+      system-name:
+        required: true
+        type: string
+        description: "System name for artifacts/display"
+      node-version:
+        required: false
+        type: number
+        default: 24
+        description: "Node.js version"
+      upload-artifact:
+        required: false
+        type: boolean
+        default: true
+        description: "Upload iOS simulator build artifact"
+
+permissions:
+  contents: read
+
+jobs:
+  ios-build:
+    name: "iOS Simulator Build"
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: ./${{ inputs.working-directory }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Detect package manager
+        id: detect-pm
+        run: |
+          if [ -f "yarn.lock" ]; then
+            echo "pm=yarn" >> "$GITHUB_OUTPUT"
+          elif [ -f "pnpm-lock.yaml" ]; then
+            echo "pm=pnpm" >> "$GITHUB_OUTPUT"
+          elif [ -f "package-lock.json" ] || [ -f "npm-shrinkwrap.json" ] || [ -f "package.json" ]; then
+            echo "pm=npm" >> "$GITHUB_OUTPUT"
+          else
+            echo "âŒ package.json is required for iOS builds."
+            exit 1
+          fi
+
+      - name: Setup Node.js ${{ inputs.node-version }} (npm)
+        if: ${{ steps.detect-pm.outputs.pm == 'npm' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+          cache-dependency-path: |
+            **/package-lock.json
+
+      - name: Setup Node.js ${{ inputs.node-version }} (yarn)
+        if: ${{ steps.detect-pm.outputs.pm == 'yarn' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "yarn"
+          cache-dependency-path: |
+            **/yarn.lock
+
+      - name: Setup Node.js ${{ inputs.node-version }} (pnpm)
+        if: ${{ steps.detect-pm.outputs.pm == 'pnpm' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "pnpm"
+          cache-dependency-path: |
+            **/pnpm-lock.yaml
+
+      - name: Install Dependencies
+        env:
+          PACKAGE_MANAGER: ${{ steps.detect-pm.outputs.pm }}
+        run: |
+          if [ "${PACKAGE_MANAGER}" = "yarn" ]; then
+            corepack enable
+            yarn install --frozen-lockfile --ignore-scripts
+          elif [ "${PACKAGE_MANAGER}" = "pnpm" ]; then
+            corepack enable
+            pnpm install --frozen-lockfile --ignore-scripts
+          else
+            npm ci --ignore-scripts
+          fi
+
+      - name: Verify iOS native project exists
+        run: |
+          if [ ! -d "ios" ]; then
+            echo "âŒ React Native iOS build requires ios/ directory in the project."
+            exit 1
+          fi
+
+      - name: Select Xcode 26.2
+        run: |
+          sw_vers
+          sudo xcode-select -s /Applications/Xcode_26.2.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Install CocoaPods Dependencies
+        if: ${{ hashFiles(format('{0}/ios/Podfile', inputs.working-directory)) != '' }}
+        run: |
+          if command -v npx >/dev/null 2>&1; then
+            npx pod-install --project-directory=ios
+          else
+            cd ios
+            pod install
+            cd - >/dev/null
+          fi
+
+      - name: Resolve iOS scheme
+        id: scheme
+        run: |
+          WORKSPACE_PATH=$(find ios -maxdepth 2 -type d -name "*.xcworkspace" ! -path "*/*.xcodeproj/*" | head -n 1)
+          if [ -z "${WORKSPACE_PATH}" ]; then
+            WORKSPACE_PATH=$(find ios -maxdepth 3 -type d -name "*.xcworkspace" ! -path "*/*.xcodeproj/*" | head -n 1)
+          fi
+          PROJECT_PATH=$(find ios -maxdepth 2 -name "*.xcodeproj" | head -n 1)
+
+          if [ -n "${WORKSPACE_PATH}" ]; then
+            LIST_JSON=$(xcodebuild -list -json -workspace "${WORKSPACE_PATH}")
+            CONTAINER_FLAG="-workspace"
+            CONTAINER_PATH="${WORKSPACE_PATH}"
+          elif [ -n "${PROJECT_PATH}" ]; then
+            LIST_JSON=$(xcodebuild -list -json -project "${PROJECT_PATH}")
+            CONTAINER_FLAG="-project"
+            CONTAINER_PATH="${PROJECT_PATH}"
+          else
+            echo "âŒ No Xcode workspace/project found under ios/."
+            exit 1
+          fi
+
+          AVAILABLE_SCHEMES=$(LIST_JSON="${LIST_JSON}" python3 -c "import json, os; data = json.loads(os.environ['LIST_JSON']); schemes = (data.get('workspace', {}).get('schemes') or []) + (data.get('project', {}).get('schemes') or []); seen = []; [seen.append(scheme) for scheme in schemes if scheme not in seen]; print('\\n'.join(seen))")
+
+          echo "â„¹ï¸ Available schemes:"
+          printf '%s\n' "${AVAILABLE_SCHEMES}"
+
+          SCHEME=$(CONTAINER_PATH="${CONTAINER_PATH}" AVAILABLE_SCHEMES="${AVAILABLE_SCHEMES}" python3 -c "import os, re; container_path = os.environ.get('CONTAINER_PATH', ''); schemes = [line.strip() for line in os.environ.get('AVAILABLE_SCHEMES', '').splitlines() if line.strip()]; container_name = os.path.splitext(os.path.basename(container_path))[0]; excluded = re.compile(r'^(Pods($|-)|.*Tests?$|.*UITests?$|.*UnitTests?$|.*IntegrationTests?$|.*SnapshotTests?$|.*tvOS.*|.*macOS.*)$', re.I); exact = next((scheme for scheme in schemes if not excluded.match(scheme) and scheme.lower() == container_name.lower()), None); contains = next((scheme for scheme in schemes if not excluded.match(scheme) and container_name and container_name.lower() in scheme.lower()), None); fallback = next((scheme for scheme in schemes if not excluded.match(scheme)), schemes[0] if schemes else ''); print(exact or contains or fallback)")
+
+          if [ -z "${SCHEME}" ]; then
+            echo "âŒ Could not resolve an iOS scheme for build."
+            exit 1
+          fi
+
+          echo "container_flag=${CONTAINER_FLAG}" >> "$GITHUB_OUTPUT"
+          echo "container_path=${CONTAINER_PATH}" >> "$GITHUB_OUTPUT"
+          echo "scheme=${SCHEME}" >> "$GITHUB_OUTPUT"
+          echo "âœ… Using iOS scheme: ${SCHEME}"
+
+      - name: Build iOS Simulator App
+        id: build-ios
+        env:
+          CONTAINER_FLAG: ${{ steps.scheme.outputs.container_flag }}
+          CONTAINER_PATH: ${{ steps.scheme.outputs.container_path }}
+          SCHEME: ${{ steps.scheme.outputs.scheme }}
+          FORCE_BUNDLING: "1"
+          SKIP_BUNDLING: ""
+        run: |
+          xcodebuild \
+            ${CONTAINER_FLAG} "${CONTAINER_PATH}" \
+            -scheme "${SCHEME}" \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath ios/build \
+            CODE_SIGNING_ALLOWED=NO \
+            CLANG_WARN_NULLABILITY_COMPLETENESS=NO \
+            GCC_TREAT_WARNINGS_AS_ERRORS=NO \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=NO \
+            clean build
+
+          APP_PATH=$(find ios/build/Build/Products -type d -name "*.app" | head -n 1)
+          if [ -z "${APP_PATH}" ]; then
+            echo "âŒ iOS simulator app output (.app) not found."
+            exit 1
+          fi
+
+          ZIP_PATH="build/${{ inputs.system-name }}-ios-simulator-app.zip"
+          ditto -c -k --sequesterRsrc --keepParent "${APP_PATH}" "${ZIP_PATH}"
+          echo "artifact_path=${PWD}/${ZIP_PATH}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload iOS Build Artifact
+        if: ${{ inputs.upload-artifact }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.system-name }}-ios-simulator-build
+          path: ${{ steps.build-ios.outputs.artifact_path }}
+          retention-days: 14
+
+

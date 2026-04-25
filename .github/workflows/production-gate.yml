@@ -1,0 +1,155 @@
+﻿# Contract: docs/workflows/production-gate.md
+# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+# â•‘  REUSABLE: Production Readiness Gate                           â•‘
+# â•‘  Approval + checklist + audit logging before production       â•‘
+# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+name: "Reusable: Production Gate"
+
+on:
+  workflow_call:
+    inputs:
+      system-dir:
+        required: true
+        type: string
+        description: "System being promoted to production"
+      app-type:
+        required: true
+        type: string
+        description: "Application type (web|api|mobile)"
+      staging-url:
+        required: false
+        type: string
+        default: ""
+        description: "Staging URL for validation"
+      require-approval:
+        required: false
+        type: boolean
+        default: true
+        description: "Require manual approval"
+    outputs:
+      approved:
+        description: "Whether production deployment was approved"
+        value: ${{ jobs.production-gate.outputs.approved }}
+      audit-id:
+        description: "Audit trail ID"
+        value: ${{ jobs.production-gate.outputs.audit-id }}
+
+permissions:
+  contents: read
+
+jobs:
+  production-gate:
+    name: "Production Readiness â€” ${{ inputs.system-dir }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      # Always route through the 'production' environment so that branch
+      # protection rules and required reviewers are enforced regardless of
+      # require-approval.  When require-approval is false the environment
+      # still runs, but callers can configure the 'production' environment in
+      # GitHub without required reviewers if they explicitly want unblocked
+      # deployments â€” keeping the audit trail intact in both cases.
+      name: production
+    outputs:
+      approved: ${{ steps.gate-check.outputs.approved }}
+      audit-id: ${{ steps.audit.outputs.id }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Pre-Deployment Checklist
+        id: checklist
+        run: |
+          echo "â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—"
+          echo "â•‘   PRODUCTION READINESS CHECKLIST             â•‘"
+          echo "â• â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•£"
+          echo "â•‘ System:      ${{ inputs.system-dir }}"
+          echo "â•‘ Type:        ${{ inputs.app-type }}"
+          echo "â•‘ Branch:      ${{ github.ref_name }}"
+          echo "â•‘ Commit:      ${{ github.sha }}"
+          echo "â•‘ Actor:       ${{ github.actor }}"
+          echo "â•‘ Timestamp:   $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "â• â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•£"
+
+          PASS=true
+
+          # Check: Must be on main branch
+          if [ "${{ github.ref_name }}" != "main" ]; then
+            echo "â•‘ âŒ Not on main branch"
+            PASS=false
+          else
+            echo "â•‘ âœ… On main branch"
+          fi
+
+          # Check: Must have staging URL configured (if production deploy, staging-url should have been verified)
+          if [ -n "${{ inputs.staging-url }}" ]; then
+            echo "â•‘ âœ… Staging URL configured: ${{ inputs.staging-url }}"
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ inputs.staging-url }}" || echo "000")
+            if [ "${STATUS}" = "200" ] || [ "${STATUS}" = "301" ] || [ "${STATUS}" = "302" ]; then
+              echo "â•‘ âœ… Staging URL is reachable (HTTP ${STATUS})"
+            else
+              echo "â•‘ âŒ Staging URL is not reachable (HTTP ${STATUS})"
+              PASS=false
+            fi
+          else
+            echo "â•‘ âš ï¸  Staging URL not provided â€” skipping reachability check"
+            echo "â•‘    Set staging-url input to enforce this gate"
+          fi
+
+          # Check: Must be called from a successful pipeline run (enforced by calling workflow's needs/if conditions)
+          # This gate cannot independently re-verify upstream test results; the calling pipeline is responsible
+          # for only invoking production-gate after all CI checks have passed.
+          echo "â•‘ âœ… Upstream CI enforcement delegated to calling pipeline"
+
+          echo "â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
+
+          if [ "$PASS" = "false" ]; then
+            echo "âŒ Pre-deployment checks failed"
+            exit 1
+          fi
+
+      - name: Gate Approval Check
+        id: gate-check
+        run: |
+          echo "approved=true" >> $GITHUB_OUTPUT
+          if [ "${{ inputs.require-approval }}" = "true" ]; then
+            echo "âœ… Production gate passed with required approval (enforced via 'production' environment reviewers)"
+          else
+            echo "âš ï¸  require-approval=false: manual reviewer gate is not enforced for this run."
+            echo "    The 'production' environment audit trail is still recorded."
+            echo "    Set require-approval=true (or configure required reviewers on the 'production'"
+            echo "    environment in GitHub repository settings) to block unattended production deploys."
+          fi
+
+      - name: Create Audit Log Entry
+        id: audit
+        run: |
+          AUDIT_ID="AUDIT-$(date +%s)-${{ github.run_id }}"
+          echo "id=$AUDIT_ID" >> $GITHUB_OUTPUT
+
+          cat << EOF > audit-log.json
+          {
+            "audit_id": "$AUDIT_ID",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "action": "production_deployment_approved",
+            "system": "${{ inputs.system-dir }}",
+            "app_type": "${{ inputs.app-type }}",
+            "branch": "${{ github.ref_name }}",
+            "commit_sha": "${{ github.sha }}",
+            "approved_by": "${{ github.actor }}",
+            "run_id": "${{ github.run_id }}",
+            "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          }
+          EOF
+
+          echo "ðŸ“‹ Audit log created: $AUDIT_ID"
+          cat audit-log.json
+
+      - name: Upload Audit Log
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.system-dir }}-production-audit
+          path: audit-log.json
+          retention-days: 365
+
+

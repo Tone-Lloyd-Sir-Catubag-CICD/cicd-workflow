@@ -1,0 +1,185 @@
+﻿# Contract: docs/workflows/versioning.md
+name: "Reusable: Versioning"
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        required: true
+        type: string
+        description: "Versioning mode: test, uat, or release (main is accepted as alias)"
+      stream:
+        required: false
+        type: string
+        default: "global"
+        description: "Version stream key (global keeps legacy test-v/main-v tags)"
+    outputs:
+      version_tag:
+        description: "Resolved version tag"
+        value: ${{ jobs.version.outputs.version_tag }}
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    name: "Create Version Tag"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      version_tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Create and Push Tag
+        id: version
+        env:
+          MODE: ${{ inputs.mode }}
+          STREAM: ${{ inputs.stream }}
+        run: |
+          STREAM_KEY=$(echo "${STREAM}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')
+          if [ -z "${STREAM_KEY}" ]; then
+            STREAM_KEY="global"
+          fi
+
+          if [ "${STREAM_KEY}" = "global" ]; then
+            TEST_PREFIX="test-v"
+            UAT_PREFIX="uat-v"
+            MAIN_PREFIX="main-v"
+          else
+            TEST_PREFIX="test-${STREAM_KEY}-v"
+            UAT_PREFIX="uat-${STREAM_KEY}-v"
+            MAIN_PREFIX="main-${STREAM_KEY}-v"
+          fi
+
+          resolve_latest_test_tag() {
+            local latest_test=""
+            local effective_prefix="${TEST_PREFIX}"
+
+            latest_test=$(git tag -l "${TEST_PREFIX}*" | grep -E "^${TEST_PREFIX}[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$" | sort -V | tail -n 1)
+
+            if [ -z "${latest_test}" ] && [ "${STREAM_KEY}" != "global" ]; then
+              local legacy_test_prefix="test-v"
+              local legacy_latest_test=""
+
+              legacy_latest_test=$(git tag -l "${legacy_test_prefix}*" | grep -E "^${legacy_test_prefix}[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$" | sort -V | tail -n 1)
+              if [ -n "${legacy_latest_test}" ]; then
+                latest_test="${legacy_latest_test}"
+                effective_prefix="${legacy_test_prefix}"
+                echo "â„¹ï¸ No stream-specific test tag found for '${STREAM_KEY}'. Falling back to legacy '${legacy_test_prefix}*' tags."
+              fi
+            fi
+
+            RESOLVED_TAG="${latest_test}"
+            RESOLVED_PREFIX="${effective_prefix}"
+          }
+
+          if [ "${MODE}" = "test" ]; then
+            PREFIX="${TEST_PREFIX}"
+            LATEST=$(git tag -l "${PREFIX}*" | grep -E "^${PREFIX}[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$" | sort -V | tail -n 1)
+
+            if [ -z "${LATEST}" ]; then
+              NEXT_VERSION="1.0.0.0"
+            else
+              RAW_VERSION="${LATEST#${PREFIX}}"
+              IFS='.' read -r MAJOR MINOR PATCH BUILD <<< "${RAW_VERSION}"
+
+              BUILD=$((BUILD + 1))
+              if [ "${BUILD}" -ge 10 ]; then
+                BUILD=0
+                PATCH=$((PATCH + 1))
+              fi
+
+              if [ "${PATCH}" -ge 10 ]; then
+                PATCH=0
+                MINOR=$((MINOR + 1))
+              fi
+
+              if [ "${MINOR}" -ge 10 ]; then
+                MINOR=0
+                MAJOR=$((MAJOR + 1))
+              fi
+
+              NEXT_VERSION="${MAJOR}.${MINOR}.${PATCH}.${BUILD}"
+            fi
+
+            TAG="${PREFIX}${NEXT_VERSION}"
+          elif [ "${MODE}" = "uat" ]; then
+            resolve_latest_test_tag
+
+            if [ -z "${RESOLVED_TAG}" ]; then
+              echo "âŒ No test version tag found for stream '${STREAM_KEY}'. uat tag requires a prior test tag."
+              exit 1
+            fi
+
+            VERSION_FROM_TEST="${RESOLVED_TAG#${RESOLVED_PREFIX}}"
+            TAG="${UAT_PREFIX}${VERSION_FROM_TEST}"
+          elif [ "${MODE}" = "release" ] || [ "${MODE}" = "main" ]; then
+            LATEST_PROMOTED=$(git tag -l "${UAT_PREFIX}*" | grep -E "^${UAT_PREFIX}[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$" | sort -V | tail -n 1)
+            EFFECTIVE_PROMOTED_PREFIX="${UAT_PREFIX}"
+
+            if [ -z "${LATEST_PROMOTED}" ] && [ "${STREAM_KEY}" != "global" ]; then
+              LEGACY_UAT_PREFIX="uat-v"
+              LEGACY_LATEST_UAT=$(git tag -l "${LEGACY_UAT_PREFIX}*" | grep -E "^${LEGACY_UAT_PREFIX}[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$" | sort -V | tail -n 1)
+              if [ -n "${LEGACY_LATEST_UAT}" ]; then
+                LATEST_PROMOTED="${LEGACY_LATEST_UAT}"
+                EFFECTIVE_PROMOTED_PREFIX="${LEGACY_UAT_PREFIX}"
+                echo "â„¹ï¸ No stream-specific uat tag found for '${STREAM_KEY}'. Falling back to legacy '${LEGACY_UAT_PREFIX}*' tags for this release."
+              fi
+            fi
+
+            if [ -z "${LATEST_PROMOTED}" ]; then
+              resolve_latest_test_tag
+              LATEST_PROMOTED="${RESOLVED_TAG}"
+              EFFECTIVE_PROMOTED_PREFIX="${RESOLVED_PREFIX}"
+              if [ -n "${LATEST_PROMOTED}" ]; then
+                echo "â„¹ï¸ No uat tag found for stream '${STREAM_KEY}'. Falling back to test tag history for this release."
+              fi
+            fi
+
+            if [ -z "${LATEST_PROMOTED}" ]; then
+              echo "âŒ No uat or test version tag found for stream '${STREAM_KEY}'. main release tag requires a prior promoted tag."
+              exit 1
+            fi
+
+            VERSION_FROM_PROMOTION="${LATEST_PROMOTED#${EFFECTIVE_PROMOTED_PREFIX}}"
+            TAG="${MAIN_PREFIX}${VERSION_FROM_PROMOTION}"
+          else
+            echo "âŒ Invalid mode: ${MODE}. Expected test, uat, or release (main alias is accepted)."
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "â„¹ï¸ Tag already exists on remote: ${TAG} â€” using existing tag."
+          else
+            # Guard against local tag collisions on reruns before creating.
+            if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null 2>&1; then
+              git tag -d "${TAG}" >/dev/null 2>&1 || true
+            fi
+
+            if [ "${MODE}" = "test" ]; then
+              git tag -a "${TAG}" -m "TEST version ${TAG}"
+            elif [ "${MODE}" = "uat" ]; then
+              git tag -a "${TAG}" -m "UAT version ${TAG}"
+            else
+              git tag -a "${TAG}" -m "MAIN release ${TAG}"
+            fi
+
+            if git push origin "${TAG}" 2>/dev/null; then
+              echo "âœ… Created and pushed tag: ${TAG}"
+            else
+              echo "âŒ Failed to push tag: ${TAG}"
+              exit 1
+            fi
+          fi
+
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+
+

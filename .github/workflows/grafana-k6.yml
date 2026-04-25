@@ -1,0 +1,232 @@
+﻿# Contract: docs/workflows/grafana-k6.md
+# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+# â•‘  REUSABLE: Grafana k6 Load Tests                               â•‘
+# â•‘  Runs k6 tests and pushes metrics to Grafana Cloud             â•‘
+# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+name: "Reusable: Grafana k6"
+
+on:
+  workflow_call:
+    inputs:
+      system-name:
+        required: true
+        type: string
+        description: "System name for display/artifacts"
+      working-directory:
+        required: false
+        type: string
+        default: "."
+        description: "Project directory (e.g. systems/system-a, or '.' for root)"
+      script-path:
+        required: false
+        type: string
+        default: "tests/performance"
+        description: "Path to k6 script or performance tests directory"
+      performance-tests-directory:
+        required: false
+        type: string
+        default: "tests/performance"
+        description: "Folder that contains performance tests"
+      target-base-url:
+        required: false
+        type: string
+        default: ""
+        description: "Optional target base URL passed as BASE_URL and K6_BASE_URL"
+      upload-artifacts:
+        required: false
+        type: boolean
+        default: true
+        description: "Upload k6 outputs/logs"
+      run-only-on-branch:
+        required: false
+        type: string
+        default: "uat"
+        description: "Branch name allowed to run k6 (default: uat)"
+    secrets:
+      K6_CLOUD_TOKEN:
+        required: true
+      K6_CLOUD_PROJECT_ID:
+        required: true
+    outputs:
+      k6-result:
+        description: "k6 pass/fail result"
+        value: ${{ jobs.finalize.outputs.result }}
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: "Prepare k6 Execution"
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.resolve.outputs.should_run }}
+    steps:
+      - name: Resolve branch rule
+        id: resolve
+        env:
+          BRANCH_RULE: ${{ inputs.run-only-on-branch }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          SHOULD_RUN="false"
+          BRANCH_NAME="${REF_NAME}"
+
+          if [ "${EVENT_NAME}" = "pull_request" ] && [ -n "${BASE_REF}" ]; then
+            BRANCH_NAME="${BASE_REF}"
+          fi
+
+          if [ -z "${BRANCH_RULE}" ] || [ "${BRANCH_RULE}" = "*" ]; then
+            SHOULD_RUN="true"
+          else
+            IFS=',' read -r -a BRANCH_RULES <<< "${BRANCH_RULE}"
+            for RULE in "${BRANCH_RULES[@]}"; do
+              CLEAN_RULE=$(echo "${RULE}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+              if [ -n "${CLEAN_RULE}" ] && [ "${BRANCH_NAME}" = "${CLEAN_RULE}" ]; then
+                SHOULD_RUN="true"
+                break
+              fi
+            done
+          fi
+
+          echo "should_run=${SHOULD_RUN}" >> "$GITHUB_OUTPUT"
+
+  k6:
+    name: "Grafana k6 â€” ${{ inputs.system-name }}"
+    needs: [prepare]
+    if: ${{ needs.prepare.outputs.should_run == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ./${{ inputs.working-directory }}
+    outputs:
+      result: ${{ steps.run-k6.outcome }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Setup k6
+        uses: grafana/setup-k6-action@v1
+
+      - name: Validate Grafana Cloud configuration
+        id: validate
+        env:
+          K6_CLOUD_TOKEN: ${{ secrets.K6_CLOUD_TOKEN }}
+          K6_CLOUD_PROJECT_ID: ${{ secrets.K6_CLOUD_PROJECT_ID }}
+          SCRIPT_PATH: ${{ inputs.script-path }}
+          PERFORMANCE_TESTS_DIRECTORY: ${{ inputs.performance-tests-directory }}
+        run: |
+          if [ -z "${K6_CLOUD_TOKEN}" ] || [ -z "${K6_CLOUD_PROJECT_ID}" ]; then
+            echo "âŒ Grafana Cloud is required: set K6_CLOUD_TOKEN and K6_CLOUD_PROJECT_ID secrets."
+            exit 1
+          fi
+
+          if [ ! -d "${PERFORMANCE_TESTS_DIRECTORY}" ]; then
+            echo "âŒ Performance tests folder not found: ${PERFORMANCE_TESTS_DIRECTORY}"
+            echo "Expected performance tests under ${PERFORMANCE_TESTS_DIRECTORY}."
+            exit 1
+          fi
+
+          RESOLVED_SCRIPT_PATHS=()
+          while IFS= read -r f; do
+            [ -n "$f" ] && RESOLVED_SCRIPT_PATHS+=("$f")
+          done < <(
+            if [ -n "${SCRIPT_PATH}" ] && [ -f "${SCRIPT_PATH}" ]; then
+              printf "%s\n" "${SCRIPT_PATH}"
+            elif [ -n "${SCRIPT_PATH}" ] && [ -d "${SCRIPT_PATH}" ]; then
+              find "${SCRIPT_PATH}" -type f \( -name '*.js' -o -name '*.ts' \) ! -name '*.d.ts' | sort
+            else
+              find "${PERFORMANCE_TESTS_DIRECTORY}" -type f \( -name '*.js' -o -name '*.ts' \) ! -name '*.d.ts' | sort
+            fi
+          )
+
+          if [ "${#RESOLVED_SCRIPT_PATHS[@]}" -eq 0 ]; then
+            echo "âŒ No k6 scripts (*.js or *.ts) found in folder checks."
+            exit 1
+          fi
+
+          {
+            echo "resolved_script_paths<<EOF"
+            printf "%s\n" "${RESOLVED_SCRIPT_PATHS[@]}"
+            echo "EOF"
+            echo "resolved_script_count=${#RESOLVED_SCRIPT_PATHS[@]}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "â„¹ï¸ Discovered ${#RESOLVED_SCRIPT_PATHS[@]} k6 script(s)."
+
+          echo "âœ… Grafana Cloud prerequisites validated."
+
+      - name: Run k6 cloud test
+        id: run-k6
+        env:
+          K6_CLOUD_TOKEN: ${{ secrets.K6_CLOUD_TOKEN }}
+          K6_CLOUD_PROJECT_ID: ${{ secrets.K6_CLOUD_PROJECT_ID }}
+          BASE_URL: ${{ inputs.target-base-url }}
+          SCRIPT_PATHS: ${{ steps.validate.outputs.resolved_script_paths }}
+          SCRIPT_COUNT: ${{ steps.validate.outputs.resolved_script_count }}
+        run: |
+          set -euo pipefail
+
+          EXPECTED_STATUSES_VALUE="${EXPECTED_STATUSES:-}"
+          if [ -n "${BASE_URL}" ] && echo "${BASE_URL}" | grep -Eiq '\\.vercel\\.app(/|$)'; then
+            EXPECTED_STATUSES_VALUE="200,401,403"
+            echo "â„¹ï¸ Vercel preview URL detected; using EXPECTED_STATUSES=${EXPECTED_STATUSES_VALUE}."
+          fi
+
+          : > k6-output.log
+          echo "â„¹ï¸ Running ${SCRIPT_COUNT} k6 script(s)." | tee -a k6-output.log
+
+          while IFS= read -r SCRIPT_PATH; do
+            [ -z "${SCRIPT_PATH}" ] && continue
+            echo "â–¶ Running k6 script: ${SCRIPT_PATH}" | tee -a k6-output.log
+            if [ -n "${BASE_URL}" ]; then
+              if [ -n "${EXPECTED_STATUSES_VALUE}" ]; then
+                k6 run --out cloud -e BASE_URL="${BASE_URL}" -e K6_BASE_URL="${BASE_URL}" -e EXPECTED_STATUSES="${EXPECTED_STATUSES_VALUE}" "${SCRIPT_PATH}" | tee -a k6-output.log
+              else
+                k6 run --out cloud -e BASE_URL="${BASE_URL}" -e K6_BASE_URL="${BASE_URL}" "${SCRIPT_PATH}" | tee -a k6-output.log
+              fi
+            else
+              k6 run --out cloud "${SCRIPT_PATH}" | tee -a k6-output.log
+            fi
+          done <<< "${SCRIPT_PATHS}"
+
+      - name: Upload k6 artifacts
+        if: ${{ inputs.upload-artifacts && always() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.system-name }}-grafana-k6-artifacts
+          path: |
+            ${{ inputs.working-directory }}/k6-output.log
+            ${{ inputs.working-directory }}/${{ inputs.performance-tests-directory }}/**
+          if-no-files-found: ignore
+          retention-days: 7
+
+  finalize:
+    name: "Finalize k6 Result"
+    needs: [prepare, k6]
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ steps.finalize.outputs.result }}
+    steps:
+      - name: Resolve final k6 result
+        id: finalize
+        env:
+          JOB_RESULT: ${{ needs.k6.result }}
+        run: |
+          if [ "${{ needs.prepare.outputs.should_run }}" != "true" ]; then
+            RESULT="skipped"
+          elif [ "${JOB_RESULT}" = "success" ]; then
+            RESULT="success"
+          elif [ "${JOB_RESULT}" = "cancelled" ]; then
+            RESULT="cancelled"
+          elif [ "${JOB_RESULT}" = "skipped" ]; then
+            RESULT="skipped"
+          else
+            RESULT="failure"
+          fi
+          echo "result=${RESULT}" >> "$GITHUB_OUTPUT"
+
+

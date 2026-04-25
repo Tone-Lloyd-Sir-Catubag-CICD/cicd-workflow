@@ -1,0 +1,627 @@
+﻿# Contract: docs/workflows/mobile-workflow.md
+# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+# â•‘  ORCHESTRATOR: Expo Mobile CI/CD Pipeline                      â•‘
+# â•‘  Stage 1 (gates): test â†’ typescript â†’ lint â†’ security         â•‘
+# â•‘  Stage 2 (build): local Android build Â· local iOS build        â•‘
+# â•‘  Stage 3 (test):  Maestro Android E2E Â· Maestro iOS E2E         â•‘
+# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+name: "Expo Mobile CI/CD Pipeline"
+
+on:
+  workflow_call:
+    inputs:
+      system-dir:
+        required: false
+        type: string
+        default: "."
+        description: "Expo project directory (e.g. BayaniHub-Mobile, or '.' for root)"
+      system-name:
+        required: true
+        type: string
+        description: "System name for artifacts/display (e.g. BayaniHub-Mobile)"
+      node-version:
+        required: false
+        type: number
+        default: 24
+        description: "Node.js version"
+      java-version:
+        required: false
+        type: string
+        default: "17"
+        description: "JDK version for Android builds"
+      coverage-threshold:
+        required: false
+        type: number
+        default: 80
+        description: "Minimum code coverage percentage"
+      enable-lint:
+        required: false
+        type: boolean
+        default: true
+        description: "Run lint checks"
+      enable-security-scan:
+        required: false
+        type: boolean
+        default: true
+        description: "Run security scanning"
+      enable-governance:
+        required: false
+        type: boolean
+        default: true
+        description: "Reserved for compatibility"
+      enable-android-build:
+        required: false
+        type: boolean
+        default: true
+        description: "Run local Android app build for Maestro (debug APK)"
+      enable-ios-build:
+        required: false
+        type: boolean
+        default: true
+        description: "Run local iOS simulator app build for Maestro (.app)"
+      enable-maestro:
+        required: false
+        type: boolean
+        default: true
+        description: "Run Maestro Android E2E tests"
+      enable-maestro-ios:
+        required: false
+        type: boolean
+        default: true
+        description: "Run Maestro iOS E2E tests"
+      android-build-command:
+        required: false
+        type: string
+        default: "./gradlew :app:assembleDebug"
+        description: "Command used to produce the Android app binary for Maestro"
+      maestro-test-command:
+        required: false
+        type: string
+        default: "maestro test .maestro"
+        description: "Maestro Android test command"
+      ios-build-command:
+        required: false
+        type: string
+        default: ""
+        description: "Optional custom command used to produce the iOS app binary for Maestro"
+      maestro-ios-test-command:
+        required: false
+        type: string
+        default: "maestro test .maestro"
+        description: "Maestro iOS test command"
+
+
+permissions:
+  contents: read
+
+jobs:
+  expo-typescript-standard:
+    name: "Expo â€” TypeScript Standard"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ./${{ inputs.system-dir }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Validate Expo + TypeScript standard
+        run: |
+          if [ ! -f "package.json" ]; then
+            echo "âŒ package.json is required for Expo systems."
+            exit 1
+          fi
+
+          if [ ! -f "tsconfig.json" ]; then
+            echo "âŒ tsconfig.json is required for Expo systems."
+            exit 1
+          fi
+
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const deps = {
+            ...(pkg.dependencies || {}),
+            ...(pkg.devDependencies || {}),
+            ...(pkg.peerDependencies || {}),
+          };
+
+          if (!deps.expo) {
+            throw new Error('Expo standard requires dependency "expo".');
+          }
+
+          if (!deps.typescript) {
+            throw new Error('Expo standard requires dependency "typescript".');
+          }
+
+          const tsconfig = JSON.parse(fs.readFileSync('tsconfig.json', 'utf8'));
+          if (!(tsconfig.compilerOptions && tsconfig.compilerOptions.strict === true)) {
+            throw new Error('Expo standard requires tsconfig.compilerOptions.strict=true.');
+          }
+
+          const ignoreDirs = new Set(['node_modules', 'android', 'ios', '.git', '.expo', 'dist', 'build', 'coverage']);
+          const sourceDirs = ['app', 'src', 'components', 'screens', 'features', 'hooks', 'utils'];
+          const jsLike = [];
+          let hasTsSource = false;
+
+          function walk(target) {
+            const entries = fs.readdirSync(target, { withFileTypes: true });
+            for (const entry of entries) {
+              if (entry.name.startsWith('.')) {
+                continue;
+              }
+
+              const fullPath = path.join(target, entry.name);
+              if (entry.isDirectory()) {
+                if (!ignoreDirs.has(entry.name)) {
+                  walk(fullPath);
+                }
+                continue;
+              }
+
+              if (/\.(ts|tsx)$/i.test(entry.name)) {
+                hasTsSource = true;
+              }
+
+              if (/\.(js|jsx)$/i.test(entry.name)) {
+                jsLike.push(fullPath.replace(/\\/g, '/'));
+              }
+            }
+          }
+
+          for (const sourceDir of sourceDirs) {
+            if (fs.existsSync(sourceDir) && fs.statSync(sourceDir).isDirectory()) {
+              walk(sourceDir);
+            }
+          }
+
+          for (const rootFile of ['App.ts', 'App.tsx']) {
+            if (fs.existsSync(rootFile)) {
+              hasTsSource = true;
+            }
+          }
+
+          for (const rootFile of ['App.js', 'App.jsx']) {
+            if (fs.existsSync(rootFile)) {
+              jsLike.push(rootFile);
+            }
+          }
+
+          if (!hasTsSource) {
+            throw new Error('Expo standard requires TypeScript application source files (.ts/.tsx).');
+          }
+
+          if (jsLike.length > 0) {
+            throw new Error('Expo standard forbids JS/JSX application source files. Found:\n' + jsLike.slice(0, 20).join('\n'));
+          }
+          NODE
+
+  # â”€â”€ Stage 1A: Unit Tests (Jest) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  mobile-unit-tests:
+    name: "Mobile â€” Jest Unit Tests"
+    uses: ./.github/workflows/mobile-tests.yml
+    with:
+      working-directory: ${{ inputs.system-dir }}
+      system-name: ${{ inputs.system-name }}
+      node-version: ${{ inputs.node-version }}
+      # runInBand reduces transient Android/Jest worker crashes in CI
+      test-command: "npx jest --coverage --verbose --ci --forceExit --runInBand"
+      coverage-threshold: ${{ inputs.coverage-threshold }}
+
+  # â”€â”€ Stage 1B: Lint (parallel with tests) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  mobile-lint:
+    name: "Mobile â€” Lint Check"
+    if: ${{ inputs.enable-lint }}
+    uses: ./.github/workflows/lint-check.yml
+    with:
+      working-directory: ${{ inputs.system-dir }}
+      system-name: ${{ inputs.system-name }}
+      node-version: ${{ inputs.node-version }}
+
+  # â”€â”€ Stage 1C: Security Scan (parallel with tests) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  mobile-security:
+    name: "Mobile â€” Security Scan"
+    if: ${{ inputs.enable-security-scan }}
+    uses: ./.github/workflows/security-scan.yml
+    with:
+      working-directory: ${{ inputs.system-dir }}
+      system-name: ${{ inputs.system-name }}
+      node-version: ${{ inputs.node-version }}
+      # Keep test branch unblocked by HIGH findings; enforce HIGH on uat/main.
+      fail-on-high: ${{ github.ref_name != 'test' && github.base_ref != 'test' }}
+
+  # â”€â”€ Stage 2A: Local Android Build â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  android-build:
+    name: "Android App Build (.apk)"
+    needs: [expo-typescript-standard, mobile-unit-tests, mobile-lint, mobile-security]
+    if: |
+      always() &&
+      inputs.enable-android-build &&
+      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: ./${{ inputs.system-dir }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Detect package manager
+        id: detect-pm
+        run: |
+          if [ -f "yarn.lock" ]; then
+            echo "pm=yarn" >> "$GITHUB_OUTPUT"
+          elif [ -f "pnpm-lock.yaml" ]; then
+            echo "pm=pnpm" >> "$GITHUB_OUTPUT"
+          elif [ -f "package-lock.json" ] || [ -f "npm-shrinkwrap.json" ] || [ -f "package.json" ]; then
+            echo "pm=npm" >> "$GITHUB_OUTPUT"
+          else
+            echo "âŒ package.json is required."
+            exit 1
+          fi
+
+      - name: Setup Node.js ${{ inputs.node-version }} (npm)
+        if: ${{ steps.detect-pm.outputs.pm == 'npm' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+          cache-dependency-path: |
+            **/package-lock.json
+
+      - name: Setup Node.js ${{ inputs.node-version }} (yarn)
+        if: ${{ steps.detect-pm.outputs.pm == 'yarn' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "yarn"
+          cache-dependency-path: |
+            **/yarn.lock
+
+      - name: Setup Node.js ${{ inputs.node-version }} (pnpm)
+        if: ${{ steps.detect-pm.outputs.pm == 'pnpm' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "pnpm"
+          cache-dependency-path: |
+            **/pnpm-lock.yaml
+
+      - name: Install Dependencies
+        env:
+          PACKAGE_MANAGER: ${{ steps.detect-pm.outputs.pm }}
+        run: |
+          if [ "${PACKAGE_MANAGER}" = "yarn" ]; then
+            corepack enable
+            yarn install --frozen-lockfile --ignore-scripts
+          elif [ "${PACKAGE_MANAGER}" = "pnpm" ]; then
+            corepack enable
+            pnpm install --frozen-lockfile --ignore-scripts
+          else
+            npm ci --ignore-scripts
+          fi
+
+      - name: Ensure Android Native Project
+        run: |
+          if [ ! -d "android" ]; then
+            CI=1 npx expo prebuild --platform android
+          fi
+
+      - name: Ensure Kotlin Version Fallback
+        run: |
+          if [ -f "android/gradle.properties" ]; then
+            if grep -q '^kotlinVersion=' android/gradle.properties; then
+              CURRENT_VERSION=$(grep '^kotlinVersion=' android/gradle.properties | head -n 1 | cut -d'=' -f2-)
+              echo "â„¹ï¸ Preserving project kotlinVersion=${CURRENT_VERSION}"
+            else
+              echo 'kotlinVersion=2.0.21' >> android/gradle.properties
+              echo "âœ… Added fallback kotlinVersion=2.0.21"
+            fi
+          fi
+
+      - name: Setup JDK ${{ inputs.java-version }}
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: ${{ inputs.java-version }}
+
+      - name: Build Android app binary
+        run: ${{ inputs.android-build-command }}
+
+      - name: Normalize Android APK path for Maestro
+        run: |
+          EXPECTED_APK="android/app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ -f "${EXPECTED_APK}" ]; then
+            echo "âœ… Android APK already present at expected path: ${EXPECTED_APK}"
+            exit 0
+          fi
+
+          CANDIDATE_APK=$(find android/app/build/outputs/apk -type f -name "*.apk" ! -name "*-androidTest.apk" | sort | head -n 1)
+          if [ -n "${CANDIDATE_APK}" ]; then
+            mkdir -p "$(dirname "${EXPECTED_APK}")"
+            cp "${CANDIDATE_APK}" "${EXPECTED_APK}"
+            echo "âœ… Normalized Android APK path: ${CANDIDATE_APK} -> ${EXPECTED_APK}"
+          else
+            echo "âŒ No Android APK was produced after build."
+            exit 1
+          fi
+
+      - name: Archive Android build outputs
+        id: archive-android
+        run: |
+          EXPECTED_APK="android/app/build/outputs/apk/debug/app-debug.apk"
+          if [ ! -f "${EXPECTED_APK}" ]; then
+            echo "âŒ Android APK not found at ${EXPECTED_APK} after build."
+            exit 1
+          fi
+
+          ARTIFACT_DIR="android-maestro-build-artifact"
+          mkdir -p "${ARTIFACT_DIR}/android/app/build/outputs/apk/debug"
+          cp "${EXPECTED_APK}" "${ARTIFACT_DIR}/android/app/build/outputs/apk/debug/app-debug.apk"
+
+          echo "artifact_path=${PWD}/${ARTIFACT_DIR}" >> "$GITHUB_OUTPUT"
+          echo "âœ… Android app APK ready for upload."
+
+      - name: Upload Android build artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.system-name }}-android-maestro-build
+          path: ${{ steps.archive-android.outputs.artifact_path }}
+          retention-days: 14
+
+  # â”€â”€ Stage 2B: Local iOS Build â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  ios-build:
+    name: "iOS Simulator App Build (.app)"
+    needs: [expo-typescript-standard, mobile-unit-tests, mobile-lint, mobile-security]
+    if: |
+      always() &&
+      inputs.enable-ios-build &&
+      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: ./${{ inputs.system-dir }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Detect package manager
+        id: detect-pm
+        run: |
+          if [ -f "yarn.lock" ]; then
+            echo "pm=yarn" >> "$GITHUB_OUTPUT"
+          elif [ -f "pnpm-lock.yaml" ]; then
+            echo "pm=pnpm" >> "$GITHUB_OUTPUT"
+          elif [ -f "package-lock.json" ] || [ -f "npm-shrinkwrap.json" ] || [ -f "package.json" ]; then
+            echo "pm=npm" >> "$GITHUB_OUTPUT"
+          else
+            echo "âŒ package.json is required."
+            exit 1
+          fi
+
+      - name: Setup Node.js ${{ inputs.node-version }} (npm)
+        if: ${{ steps.detect-pm.outputs.pm == 'npm' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "npm"
+          cache-dependency-path: |
+            **/package-lock.json
+
+      - name: Setup Node.js ${{ inputs.node-version }} (yarn)
+        if: ${{ steps.detect-pm.outputs.pm == 'yarn' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "yarn"
+          cache-dependency-path: |
+            **/yarn.lock
+
+      - name: Setup Node.js ${{ inputs.node-version }} (pnpm)
+        if: ${{ steps.detect-pm.outputs.pm == 'pnpm' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "pnpm"
+          cache-dependency-path: |
+            **/pnpm-lock.yaml
+
+      - name: Install Dependencies
+        env:
+          PACKAGE_MANAGER: ${{ steps.detect-pm.outputs.pm }}
+        run: |
+          if [ "${PACKAGE_MANAGER}" = "yarn" ]; then
+            corepack enable
+            yarn install --frozen-lockfile --ignore-scripts
+          elif [ "${PACKAGE_MANAGER}" = "pnpm" ]; then
+            corepack enable
+            pnpm install --frozen-lockfile --ignore-scripts
+          else
+            npm ci --ignore-scripts
+          fi
+
+      - name: Select Xcode 26.2
+        run: |
+          sw_vers
+          sudo xcode-select -s /Applications/Xcode_26.2.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Ensure iOS Native Project
+        run: |
+          if [ ! -d "ios" ]; then
+            CI=1 npx expo prebuild --platform ios
+          fi
+
+      - name: Install CocoaPods Dependencies
+        if: ${{ hashFiles(format('{0}/ios/Podfile', inputs.system-dir)) != '' }}
+        run: |
+          if command -v npx >/dev/null 2>&1; then
+            npx pod-install --project-directory=ios
+          else
+            cd ios
+            pod install
+            cd - >/dev/null
+          fi
+
+      - name: Resolve iOS scheme
+        id: ios-scheme
+        run: |
+          WORKSPACE_PATH=$(find ios -maxdepth 2 -type d -name "*.xcworkspace" ! -path "*/*.xcodeproj/*" | head -n 1)
+          if [ -z "${WORKSPACE_PATH}" ]; then
+            WORKSPACE_PATH=$(find ios -maxdepth 3 -type d -name "*.xcworkspace" ! -path "*/*.xcodeproj/*" | head -n 1)
+          fi
+          PROJECT_PATH=$(find ios -maxdepth 2 -name "*.xcodeproj" | head -n 1)
+
+          if [ -n "${WORKSPACE_PATH}" ]; then
+            LIST_JSON=$(xcodebuild -list -json -workspace "${WORKSPACE_PATH}")
+            CONTAINER_FLAG="-workspace"
+            CONTAINER_PATH="${WORKSPACE_PATH}"
+          elif [ -n "${PROJECT_PATH}" ]; then
+            LIST_JSON=$(xcodebuild -list -json -project "${PROJECT_PATH}")
+            CONTAINER_FLAG="-project"
+            CONTAINER_PATH="${PROJECT_PATH}"
+          else
+            echo "âŒ No Xcode workspace/project found under ios/."
+            exit 1
+          fi
+
+          AVAILABLE_SCHEMES=$(LIST_JSON="${LIST_JSON}" python3 -c "import json, os; data = json.loads(os.environ['LIST_JSON']); schemes = (data.get('workspace', {}).get('schemes') or []) + (data.get('project', {}).get('schemes') or []); seen = []; [seen.append(scheme) for scheme in schemes if scheme not in seen]; print('\\n'.join(seen))")
+
+          echo "â„¹ï¸ Available schemes:"
+          printf '%s\n' "${AVAILABLE_SCHEMES}"
+
+          SCHEME=$(CONTAINER_PATH="${CONTAINER_PATH}" AVAILABLE_SCHEMES="${AVAILABLE_SCHEMES}" python3 -c "import os, re; container_path = os.environ.get('CONTAINER_PATH', ''); schemes = [line.strip() for line in os.environ.get('AVAILABLE_SCHEMES', '').splitlines() if line.strip()]; container_name = os.path.splitext(os.path.basename(container_path))[0]; preferred_names = [container_name]; excluded = re.compile(r'^(Pods($|-)|.*Tests?$|.*UITests?$|.*UnitTests?$|.*IntegrationTests?$|.*SnapshotTests?$|.*tvOS.*|.*macOS.*)$', re.I); exact = next((scheme for preferred in preferred_names for scheme in schemes if not excluded.match(scheme) and scheme.lower() == preferred.lower()), None); contains = next((scheme for preferred in preferred_names for scheme in schemes if not excluded.match(scheme) and preferred and preferred.lower() in scheme.lower()), None); fallback = next((scheme for scheme in schemes if not excluded.match(scheme)), schemes[0] if schemes else ''); print(exact or contains or fallback)")
+
+          if [ -z "${SCHEME}" ]; then
+            echo "âŒ Could not resolve an iOS scheme for build."
+            exit 1
+          fi
+
+          echo "container_flag=${CONTAINER_FLAG}" >> "$GITHUB_OUTPUT"
+          echo "container_path=${CONTAINER_PATH}" >> "$GITHUB_OUTPUT"
+          echo "scheme=${SCHEME}" >> "$GITHUB_OUTPUT"
+          echo "âœ… Using iOS scheme: ${SCHEME}"
+
+      - name: Build iOS app binary
+        env:
+          CONTAINER_FLAG: ${{ steps.ios-scheme.outputs.container_flag }}
+          CONTAINER_PATH: ${{ steps.ios-scheme.outputs.container_path }}
+          SCHEME: ${{ steps.ios-scheme.outputs.scheme }}
+          IOS_BUILD_COMMAND: ${{ inputs.ios-build-command }}
+          FORCE_BUNDLING: "1"
+          SKIP_BUNDLING: ""
+        run: |
+          if [ -n "${IOS_BUILD_COMMAND}" ]; then
+            echo "â„¹ï¸ Running custom iOS app build command for Maestro."
+            # Use bash -c with the command passed via env var to avoid direct eval of interpolated input
+            bash -c "${IOS_BUILD_COMMAND}"
+            exit 0
+          fi
+
+          echo "â„¹ï¸ Running explicit xcodebuild for the default Maestro iOS simulator configuration."
+          xcodebuild \
+            ${CONTAINER_FLAG} "${CONTAINER_PATH}" \
+            -scheme "${SCHEME}" \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath ios/build \
+            CODE_SIGNING_ALLOWED=NO \
+            CLANG_WARN_NULLABILITY_COMPLETENESS=NO \
+            GCC_TREAT_WARNINGS_AS_ERRORS=NO \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=NO \
+            clean build
+
+      - name: Normalize iOS app bundle path for Maestro
+        run: |
+          EXPECTED_APP="ios/build/Build/Products/Debug-iphonesimulator/MaestroApp.app"
+
+          if [ -d "${EXPECTED_APP}" ]; then
+            echo "âœ… iOS app bundle already present at expected path: ${EXPECTED_APP}"
+            exit 0
+          fi
+
+          CANDIDATE_APP=$(find ios/build -type d -name "*.app" | sort | head -n 1)
+          if [ -z "${CANDIDATE_APP}" ]; then
+            echo "âŒ No iOS .app bundle was produced after build."
+            exit 1
+          fi
+
+          mkdir -p "$(dirname "${EXPECTED_APP}")"
+          rm -rf "${EXPECTED_APP}"
+          cp -R "${CANDIDATE_APP}" "${EXPECTED_APP}"
+          echo "âœ… Normalized iOS app bundle path: ${CANDIDATE_APP} -> ${EXPECTED_APP}"
+
+      - name: Archive iOS build outputs
+        id: archive-ios
+        run: |
+          APP_PATH="ios/build/Build/Products/Debug-iphonesimulator/MaestroApp.app"
+          if [ ! -d "${APP_PATH}" ]; then
+            echo "âŒ iOS .app bundle not found after the app build step."
+            exit 1
+          fi
+          ZIP_PATH="maestro-ios-build.app.zip"
+          ditto -c -k --sequesterRsrc --keepParent "${APP_PATH}" "${ZIP_PATH}"
+          echo "artifact_path=${PWD}/${ZIP_PATH}" >> "$GITHUB_OUTPUT"
+          echo "âœ… iOS app bundle zipped for upload."
+
+      - name: Upload iOS build artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.system-name }}-ios-maestro-build
+          path: ${{ steps.archive-ios.outputs.artifact_path }}
+          retention-days: 14
+
+  # â”€â”€ Stage 3A: Maestro Android E2E â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  mobile-maestro:
+    name: "Mobile â€” Maestro Android E2E"
+    needs: [expo-typescript-standard, mobile-unit-tests, mobile-lint, mobile-security, android-build]
+    if: |
+      always() &&
+      inputs.enable-maestro &&
+      needs.android-build.result == 'success' &&
+      !contains(needs.expo-typescript-standard.result, 'failure') &&
+      !contains(needs.mobile-unit-tests.result, 'failure') &&
+      !contains(needs.expo-typescript-standard.result, 'cancelled') &&
+      !contains(needs.mobile-unit-tests.result, 'cancelled')
+    uses: ./.github/workflows/mobile-maestro.yml
+    with:
+      working-directory: ${{ inputs.system-dir }}
+      system-name: ${{ inputs.system-name }}
+      node-version: ${{ inputs.node-version }}
+      java-version: ${{ inputs.java-version }}
+      project-type: "expo"
+      android-build-command: ${{ inputs.android-build-command }}
+      maestro-test-command: ${{ inputs.maestro-test-command }}
+      skip-build: ${{ needs.android-build.result == 'success' }}
+      build-artifact-name: ${{ needs.android-build.result == 'success' && format('{0}-android-maestro-build', inputs.system-name) || '' }}
+
+  # â”€â”€ Stage 3B: Maestro iOS E2E â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  mobile-maestro-ios:
+    name: "Mobile â€” Maestro iOS E2E"
+    needs: [expo-typescript-standard, mobile-unit-tests, mobile-lint, mobile-security, ios-build]
+    if: |
+      always() &&
+      inputs.enable-maestro-ios &&
+      needs.ios-build.result == 'success' &&
+      !contains(needs.expo-typescript-standard.result, 'failure') &&
+      !contains(needs.mobile-unit-tests.result, 'failure') &&
+      !contains(needs.expo-typescript-standard.result, 'cancelled') &&
+      !contains(needs.mobile-unit-tests.result, 'cancelled')
+    uses: ./.github/workflows/mobile-maestro-ios.yml
+    with:
+      working-directory: ${{ inputs.system-dir }}
+      system-name: ${{ inputs.system-name }}
+      node-version: ${{ inputs.node-version }}
+      ios-build-command: ${{ inputs.ios-build-command }}
+      maestro-test-command: ${{ inputs.maestro-ios-test-command }}
+      skip-build: ${{ needs.ios-build.result == 'success' }}
+      build-artifact-name: ${{ needs.ios-build.result == 'success' && format('{0}-ios-maestro-build', inputs.system-name) || '' }}
+
+

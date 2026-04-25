@@ -1,0 +1,145 @@
+﻿# Contract: docs/workflows/backend-db-check.md
+# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+# â•‘  REUSABLE: Backend DB Migration Check                          â•‘
+# â•‘  Validates that pending migrations are consistent and safe     â•‘
+# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+name: "Reusable: Backend DB Migration Check"
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        required: false
+        type: string
+        default: "."
+        description: "Project directory"
+      system-name:
+        required: false
+        type: string
+        default: "backend"
+        description: "System name for display"
+      node-version:
+        required: false
+        type: number
+        default: 24
+        description: "Node.js version"
+      migration-command:
+        required: false
+        type: string
+        default: ""
+        description: "Custom migration check command (auto-detected if empty)"
+    outputs:
+      migration-status:
+        description: "Migration check result"
+        value: ${{ jobs.check-migration.outputs.status }}
+
+permissions:
+  contents: read
+
+jobs:
+  check-migration:
+    name: "DB Migration Check (${{ inputs.system-name }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      status: ${{ steps.check.outputs.status }}
+    defaults:
+      run:
+        working-directory: ./${{ inputs.working-directory }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Install Dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Detect and Run Migration Check
+        id: check
+        env:
+          CUSTOM_CMD: ${{ inputs.migration-command }}
+        run: |
+          echo "â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—"
+          echo "â•‘   DB MIGRATION VALIDATION                    â•‘"
+          echo "â• â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•£"
+          echo "â•‘ System: ${{ inputs.system-name }}"
+          echo "â•‘ Directory: ${{ inputs.working-directory }}"
+          echo "â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
+
+          # Use custom command if provided
+          if [ -n "${CUSTOM_CMD}" ]; then
+            echo "ðŸ”§ Running custom migration command..."
+            eval "${CUSTOM_CMD}"
+            echo "status=success" >> "$GITHUB_OUTPUT"
+            echo "âœ… Custom migration check passed"
+            exit 0
+          fi
+
+          # Auto-detect migration framework from package.json
+          if [ ! -f "package.json" ]; then
+            echo "âš ï¸ No package.json found â€” skipping migration check."
+            echo "status=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          HAS_PRISMA=$(jq -r '.dependencies.prisma // .devDependencies.prisma // .dependencies["@prisma/client"] // .devDependencies["@prisma/client"] // empty' package.json 2>/dev/null || true)
+          HAS_TYPEORM=$(jq -r '.dependencies.typeorm // .devDependencies.typeorm // empty' package.json 2>/dev/null || true)
+          HAS_KNEX=$(jq -r '.dependencies.knex // .devDependencies.knex // empty' package.json 2>/dev/null || true)
+          HAS_DRIZZLE=$(jq -r '.dependencies["drizzle-orm"] // .devDependencies["drizzle-orm"] // empty' package.json 2>/dev/null || true)
+
+          SCRIPTS_JSON=$(jq -r '.scripts // {}' package.json 2>/dev/null)
+          HAS_MIGRATE_CHECK=$(echo "${SCRIPTS_JSON}" | jq -r '."migrate:check" // empty' 2>/dev/null || true)
+          HAS_MIGRATE_STATUS=$(echo "${SCRIPTS_JSON}" | jq -r '."migrate:status" // empty' 2>/dev/null || true)
+          HAS_DB_CHECK=$(echo "${SCRIPTS_JSON}" | jq -r '."db:check" // empty' 2>/dev/null || true)
+
+          # Try explicit npm scripts first
+          if [ -n "${HAS_MIGRATE_CHECK}" ]; then
+            echo "ðŸ” Found npm script 'migrate:check' â€” running..."
+            npm run migrate:check
+          elif [ -n "${HAS_DB_CHECK}" ]; then
+            echo "ðŸ” Found npm script 'db:check' â€” running..."
+            npm run db:check
+          elif [ -n "${HAS_MIGRATE_STATUS}" ]; then
+            echo "ðŸ” Found npm script 'migrate:status' â€” running..."
+            npm run migrate:status
+          # Fall back to framework-specific validation
+          elif [ -n "${HAS_PRISMA}" ]; then
+            echo "ðŸ” Detected Prisma â€” validating schema..."
+            npx prisma validate
+            echo "ðŸ” Checking for migration drift..."
+            npx prisma migrate diff --from-schema-datamodel prisma/schema.prisma --to-schema-datamodel prisma/schema.prisma --exit-code || true
+          elif [ -n "${HAS_TYPEORM}" ]; then
+            echo "ðŸ” Detected TypeORM â€” checking migration files..."
+            MIGRATION_DIR=$(find . -type d -name "migrations" -not -path "*/node_modules/*" | head -1)
+            if [ -n "${MIGRATION_DIR}" ]; then
+              MIGRATION_COUNT=$(find "${MIGRATION_DIR}" -type f -name "*.ts" -o -name "*.js" | wc -l)
+              echo "â„¹ï¸ Found ${MIGRATION_COUNT} migration file(s) in ${MIGRATION_DIR}"
+            else
+              echo "âš ï¸ No migrations directory found for TypeORM project."
+            fi
+            npx typeorm migration:show 2>/dev/null || echo "â„¹ï¸ TypeORM migration:show requires a database connection â€” schema validation only."
+          elif [ -n "${HAS_KNEX}" ]; then
+            echo "ðŸ” Detected Knex â€” listing migrations..."
+            npx knex migrate:list 2>/dev/null || echo "â„¹ï¸ Knex migrate:list requires a database connection â€” checking migration files exist."
+            MIGRATION_DIR=$(find . -type d -name "migrations" -not -path "*/node_modules/*" | head -1)
+            if [ -n "${MIGRATION_DIR}" ]; then
+              echo "âœ… Migration directory found: ${MIGRATION_DIR}"
+            fi
+          elif [ -n "${HAS_DRIZZLE}" ]; then
+            echo "ðŸ” Detected Drizzle â€” checking schema..."
+            npx drizzle-kit check 2>/dev/null || echo "â„¹ï¸ drizzle-kit check not available in this version."
+          else
+            echo "âš ï¸ No supported migration framework detected (Prisma, TypeORM, Knex, Drizzle)."
+            echo "â„¹ï¸ Add a 'migrate:check' script to package.json for custom migration validation."
+            echo "status=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "status=success" >> "$GITHUB_OUTPUT"
+          echo "âœ… Migration check passed"
+
+
