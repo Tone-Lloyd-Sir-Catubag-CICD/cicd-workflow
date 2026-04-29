@@ -2,6 +2,18 @@
 
 This reset keeps only the baseline GitHub Actions workflow library. New repositories should start from `workflow-templates/` and call these reusable workflows directly.
 
+For the platform Create Project flow, workflow templates are selected through a
+catalog model:
+
+```text
+repoShape -> projectTypeId -> workflowRecipeId -> options
+```
+
+The catalog should live in `catalog/`, starter source files should live in
+`starter-templates/`, and renderable caller workflows should live in
+`workflow-templates/`. MVP enables `single-app` only; monorepo/fullstack/library
+and mobile should be added later as catalog-backed shapes.
+
 ## Remaining Reusable Workflows
 
 | Workflow | Role | Purpose |
@@ -31,4 +43,7 @@ This reset keeps only the baseline GitHub Actions workflow library. New reposito
 - `.md` files document workflow contracts only.
 - Keep ordering in consumer workflows with `needs`.
 - Keep all workflow runtime dependencies current. Node.js defaults should track the current Active LTS release, and GitHub Action pins should move to current stable major versions after checking runner compatibility.
+- Do not add one template per option combination. Add project types, workflow
+  recipes, and supported options to the catalog, then let the backend render the
+  selected recipe.
 - Do not reintroduce deploy, promotion, release, E2E, performance, or stack-composition workflows until the baseline is stable.
