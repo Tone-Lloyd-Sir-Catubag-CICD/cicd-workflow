@@ -125,11 +125,44 @@ jobs:
         run: |
           set -euo pipefail
 
-          if grep -R -n -E 'templates/.*pipeline-caller|pipeline-caller\.yml|master-pipeline|call-orchestrator' \
+          if grep -R -n -E 'templates/.*pipeline[-]caller|pipeline[-]caller\.yml|master[-]pipeline|call[-]orchestrator' \
             workflow-templates docs/workflows; then
             echo "::error::Granular docs/templates/validation must not depend on old long-pipeline callers"
             exit 1
           fi
+
+  validate-runtime-policy:
+    name: "Validate Runtime Policy"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v6
+
+      - name: Assert current runtime and action pins
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          failed=0
+          scan_paths=".github/workflows workflow-templates docs/workflows"
+
+          if grep -R -n -E "node-version:[[:space:]]*['\"]?20['\"]?|default:[[:space:]]*['\"]20['\"]" ${scan_paths}; then
+            echo "::error::Node 20 defaults are not allowed unless a template is explicitly marked legacy."
+            failed=1
+          fi
+
+          if grep -R -n -E 'actions/(checkout|setup-node|upload-artifact)@v[1-5]([^0-9]|$)' ${scan_paths}; then
+            echo "::error::Found stale core action major pins. Keep generated and reusable workflows current."
+            failed=1
+          fi
+
+          if grep -R -n -E 'b[c] -l|pipeline[-]caller\.yml|master[-]pipeline|call[-]orchestrator' ${scan_paths}; then
+            echo "::error::Found legacy workflow utility or caller references."
+            failed=1
+          fi
+
+          exit "$failed"
 
   smoke-test-template-shapes:
     name: "Smoke Test Template Shapes"
@@ -144,8 +177,23 @@ jobs:
         run: |
           set -euo pipefail
 
+          failed=0
           for template in workflow-templates/*.yml; do
-            grep -Fq "validate-access:" "$template"
+            first_job=$(awk '
+              /^jobs:/ { in_jobs=1; next }
+              in_jobs && /^[[:alnum:]_-]+:/ {
+                name=$1
+                sub(/:$/, "", name)
+                print name
+                exit
+              }
+            ' "$template")
+
+            if [ "${first_job}" != "validate-access" ]; then
+              echo "::error file=${template}::First template job must be validate-access"
+              failed=1
+            fi
+
             grep -Fq "validate-subscription.yml@v1" "$template"
             grep -Fq "CI_TOKEN: \${{ secrets.CI_TOKEN }}" "$template"
           done
@@ -160,3 +208,5 @@ jobs:
           grep -Fq "frontend-tests.yml@v1" workflow-templates/fe-nextjs.yml
           grep -Fq "backend-tests.yml@v1" workflow-templates/be-nodejs.yml
           grep -Fq "backend-tests.yml@v1" workflow-templates/be-nestjs.yml
+
+          exit "$failed"

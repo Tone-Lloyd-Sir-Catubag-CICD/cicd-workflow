@@ -1,8 +1,4 @@
-﻿# Contract: docs/workflows/frontend-tests.md
-# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
-# â•‘  REUSABLE: Frontend Unit Tests                                 â•‘
-# â•‘  Called by any tribe's frontend pipeline                       â•‘
-# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# Contract: docs/workflows/frontend-tests.md
 name: "Reusable: Frontend Unit Tests"
 
 on:
@@ -81,11 +77,11 @@ jobs:
           UNIT_TESTS_DIRECTORY: ${{ inputs.unit-tests-directory }}
         run: |
           if [ ! -d "${UNIT_TESTS_DIRECTORY}" ]; then
-            echo "âŒ Unit tests folder not found: ${UNIT_TESTS_DIRECTORY}"
+            echo "Unit tests folder not found: ${UNIT_TESTS_DIRECTORY}"
             echo "Expected unit tests under ${UNIT_TESTS_DIRECTORY}."
             exit 1
           fi
-          echo "âœ… Unit tests folder found: ${UNIT_TESTS_DIRECTORY}"
+          echo "Unit tests folder found: ${UNIT_TESTS_DIRECTORY}"
 
       - name: Install Dependencies
         run: npm ci --ignore-scripts
@@ -114,20 +110,31 @@ jobs:
             read -r LINES_COVERAGE FUNCTIONS_COVERAGE BRANCHES_COVERAGE STATEMENTS_COVERAGE <<< "${METRICS}"
 
             echo "coverage=$LINES_COVERAGE" >> "$GITHUB_OUTPUT"
-            echo "ðŸ“Š Coverage â€” lines: ${LINES_COVERAGE}%, functions: ${FUNCTIONS_COVERAGE}%, branches: ${BRANCHES_COVERAGE}%, statements: ${STATEMENTS_COVERAGE}%"
+            echo "Coverage - lines: ${LINES_COVERAGE}%, functions: ${FUNCTIONS_COVERAGE}%, branches: ${BRANCHES_COVERAGE}%, statements: ${STATEMENTS_COVERAGE}%"
 
             THRESHOLD=${{ inputs.coverage-threshold }}
-            if (( $(echo "$LINES_COVERAGE < $THRESHOLD" | bc -l) )) || \
-               (( $(echo "$FUNCTIONS_COVERAGE < $THRESHOLD" | bc -l) )) || \
-               (( $(echo "$BRANCHES_COVERAGE < $THRESHOLD" | bc -l) )) || \
-               (( $(echo "$STATEMENTS_COVERAGE < $THRESHOLD" | bc -l) )); then
-              echo "âŒ Coverage is below threshold ${THRESHOLD}% (lines/functions/branches/statements must all pass)"
-              exit 1
-            else
-              echo "âœ… Coverage meets threshold ${THRESHOLD}% for lines/functions/branches/statements"
-            fi
+            LINES_COVERAGE="${LINES_COVERAGE}" \
+            FUNCTIONS_COVERAGE="${FUNCTIONS_COVERAGE}" \
+            BRANCHES_COVERAGE="${BRANCHES_COVERAGE}" \
+            STATEMENTS_COVERAGE="${STATEMENTS_COVERAGE}" \
+            THRESHOLD="${THRESHOLD}" \
+            node -e "
+              const threshold = Number(process.env.THRESHOLD);
+              const metrics = {
+                lines: Number(process.env.LINES_COVERAGE),
+                functions: Number(process.env.FUNCTIONS_COVERAGE),
+                branches: Number(process.env.BRANCHES_COVERAGE),
+                statements: Number(process.env.STATEMENTS_COVERAGE),
+              };
+              const failing = Object.entries(metrics).filter(([, value]) => value < threshold);
+              if (failing.length > 0) {
+                console.error('Coverage is below threshold ' + threshold + '%: ' + failing.map(([name, value]) => name + '=' + value + '%').join(', '));
+                process.exit(1);
+              }
+              console.log('Coverage meets threshold ' + threshold + '% for lines/functions/branches/statements');
+            "
           else
-            echo "âŒ coverage/coverage-summary.json not found â€” failing coverage gate"
+            echo "coverage/coverage-summary.json not found - failing coverage gate"
             exit 1
           fi
 

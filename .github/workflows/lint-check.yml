@@ -1,8 +1,4 @@
-﻿# Contract: docs/workflows/lint-check.md
-# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
-# â•‘  REUSABLE: Lint & Code Style                                   â•‘
-# â•‘  ESLint + Prettier for JS/TS projects                         â•‘
-# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# Contract: docs/workflows/lint-check.md
 name: "Reusable: Lint & Code Style"
 
 on:
@@ -73,15 +69,15 @@ jobs:
       - name: Run Linter
         id: lint
         run: |
-          echo "ðŸ” Running lint checks..."
+          echo "Running lint checks..."
           ${{ inputs.lint-command }}
-          echo "âœ… Lint checks passed"
+          echo "Lint checks passed"
 
       - name: Check Code Formatting
         if: ${{ inputs.format-check-command != '' }}
         run: |
-          echo "ðŸŽ¨ Checking code formatting..."
+          echo "Checking code formatting..."
           ${{ inputs.format-check-command }}
-          echo "âœ… Formatting is consistent"
+          echo "Formatting is consistent"
 
 

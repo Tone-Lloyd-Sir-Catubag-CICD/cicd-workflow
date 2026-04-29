@@ -1,4 +1,4 @@
-﻿# Contract: docs/workflows/validate-subscription.md
+# Contract: docs/workflows/validate-subscription.md
 name: "Validate CI Subscription"
 
 on:

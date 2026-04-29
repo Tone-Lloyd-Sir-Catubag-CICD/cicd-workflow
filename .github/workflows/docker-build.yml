@@ -1,8 +1,4 @@
-﻿# Contract: docs/workflows/docker-build.md
-# â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
-# â•‘  REUSABLE: Docker Build & Push to GHCR                        â•‘
-# â•‘  For backend services â€” builds, tags, scans, and pushes       â•‘
-# â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# Contract: docs/workflows/docker-build.md
 name: "Reusable: Docker Build & Registry"
 
 on:
@@ -145,10 +141,10 @@ jobs:
 
       - name: Image Summary
         run: |
-          echo "ðŸ³ Image Tags:"
+          echo "Image Tags:"
           echo "${{ steps.meta.outputs.tags }}"
           echo ""
-          echo "ðŸ·ï¸ Git SHA: ${{ github.sha }}"
+          echo "Git SHA: ${{ github.sha }}"
 
       # When not pushing, scan the locally-loaded image in this job
       # (the separate vulnerability-scan job can only pull from GHCR)
@@ -226,7 +222,7 @@ jobs:
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "âš ï¸ trivy-results.sarif was not generated."
+            echo "Warning: trivy-results.sarif was not generated."
           fi
 
       - name: Upload Trivy Scan Results
