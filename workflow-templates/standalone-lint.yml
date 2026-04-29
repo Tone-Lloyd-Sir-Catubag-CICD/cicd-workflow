@@ -30,7 +30,13 @@ permissions:
   contents: read
 
 jobs:
+  validate-access:
+    uses: Tone-Lloyd-Sir-Catubag-CICD/central-workflow/.github/workflows/validate-subscription.yml@v1
+    secrets:
+      CI_TOKEN: ${{ secrets.CI_TOKEN }}
+
   lint:
+    needs: validate-access
     uses: Tone-Lloyd-Sir-Catubag-CICD/central-workflow/.github/workflows/lint-check.yml@v1
     with:
       working-directory: ${{ inputs.service_path || '.' }}

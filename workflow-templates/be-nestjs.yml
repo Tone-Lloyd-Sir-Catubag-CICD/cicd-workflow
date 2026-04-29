@@ -42,7 +42,13 @@ permissions:
   security-events: write
 
 jobs:
+  validate-access:
+    uses: Tone-Lloyd-Sir-Catubag-CICD/central-workflow/.github/workflows/validate-subscription.yml@v1
+    secrets:
+      CI_TOKEN: ${{ secrets.CI_TOKEN }}
+
   unit-tests:
+    needs: validate-access
     uses: Tone-Lloyd-Sir-Catubag-CICD/central-workflow/.github/workflows/backend-tests.yml@v1
     with:
       working-directory: ${{ inputs.service_path || '.' }}
@@ -54,6 +60,7 @@ jobs:
       run-parallel: false
 
   lint:
+    needs: validate-access
     uses: Tone-Lloyd-Sir-Catubag-CICD/central-workflow/.github/workflows/lint-check.yml@v1
     with:
       working-directory: ${{ inputs.service_path || '.' }}
@@ -62,6 +69,7 @@ jobs:
       lint-command: npm run lint
 
   security:
+    needs: validate-access
     uses: Tone-Lloyd-Sir-Catubag-CICD/central-workflow/.github/workflows/security-scan.yml@v1
     with:
       working-directory: ${{ inputs.service_path || '.' }}
@@ -70,7 +78,7 @@ jobs:
       fail-on-high: true
 
   docker:
-    needs: [unit-tests, lint, security]
+    needs: [validate-access, unit-tests, lint, security]
     if: ${{ inputs.docker_image != '' }}
     uses: Tone-Lloyd-Sir-Catubag-CICD/central-workflow/.github/workflows/docker-build.yml@v1
     with:

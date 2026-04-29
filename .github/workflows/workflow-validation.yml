@@ -144,10 +144,17 @@ jobs:
         run: |
           set -euo pipefail
 
-          grep -Fq "needs: [unit-tests, lint, security]" workflow-templates/fe-react.yml
-          grep -Fq "needs: [unit-tests, lint, security]" workflow-templates/fe-nextjs.yml
-          grep -Fq "needs: [unit-tests, lint, security]" workflow-templates/be-nodejs.yml
-          grep -Fq "needs: [unit-tests, lint, security]" workflow-templates/be-nestjs.yml
+          for template in workflow-templates/*.yml; do
+            grep -Fq "validate-access:" "$template"
+            grep -Fq "validate-subscription.yml@v1" "$template"
+            grep -Fq "CI_TOKEN: \${{ secrets.CI_TOKEN }}" "$template"
+          done
+
+          grep -Fq "needs: [validate-access, unit-tests, lint, security]" workflow-templates/fe-react.yml
+          grep -Fq "needs: [validate-access, unit-tests, lint, security]" workflow-templates/fe-nextjs.yml
+          grep -Fq "needs: [validate-access, unit-tests, lint, security]" workflow-templates/be-nodejs.yml
+          grep -Fq "needs: [validate-access, unit-tests, lint, security]" workflow-templates/be-nestjs.yml
+          grep -Fq "needs: validate-access" workflow-templates/standalone-lint.yml
 
           grep -Fq "frontend-tests.yml@v1" workflow-templates/fe-react.yml
           grep -Fq "frontend-tests.yml@v1" workflow-templates/fe-nextjs.yml
