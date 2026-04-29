@@ -24,7 +24,7 @@ on:
         description: "Node.js version"
         required: false
         type: number
-        default: 20
+        default: 24
 
 permissions:
   contents: read
@@ -41,5 +41,5 @@ jobs:
     with:
       working-directory: ${{ inputs.service_path || '.' }}
       system-name: ${{ inputs.service_name || 'app' }}
-      node-version: ${{ inputs.node_version || 20 }}
+      node-version: ${{ inputs.node_version || 24 }}
 

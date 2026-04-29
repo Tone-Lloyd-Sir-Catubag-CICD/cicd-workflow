@@ -30,4 +30,5 @@ This reset keeps only the baseline GitHub Actions workflow library. New reposito
 - `.yml` files are GitHub Actions workflows or reusable workflow templates.
 - `.md` files document workflow contracts only.
 - Keep ordering in consumer workflows with `needs`.
+- Keep all workflow runtime dependencies current. Node.js defaults should track the current Active LTS release, and GitHub Action pins should move to current stable major versions after checking runner compatibility.
 - Do not reintroduce deploy, promotion, release, E2E, performance, or stack-composition workflows until the baseline is stable.

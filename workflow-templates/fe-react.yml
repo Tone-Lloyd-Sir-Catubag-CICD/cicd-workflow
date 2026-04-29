@@ -24,7 +24,7 @@ on:
         description: "Node.js version"
         required: false
         type: number
-        default: 20
+        default: 24
       coverage_threshold:
         description: "Minimum coverage percentage"
         required: false
@@ -47,7 +47,7 @@ jobs:
     with:
       working-directory: ${{ inputs.service_path || '.' }}
       system-name: ${{ inputs.service_name || 'frontend' }}
-      node-version: ${{ inputs.node_version || 20 }}
+      node-version: ${{ inputs.node_version || 24 }}
       coverage-threshold: ${{ inputs.coverage_threshold || 80 }}
 
   lint:
@@ -56,7 +56,7 @@ jobs:
     with:
       working-directory: ${{ inputs.service_path || '.' }}
       system-name: ${{ inputs.service_name || 'frontend' }}
-      node-version: ${{ inputs.node_version || 20 }}
+      node-version: ${{ inputs.node_version || 24 }}
 
   security:
     needs: validate-access
@@ -64,7 +64,7 @@ jobs:
     with:
       working-directory: ${{ inputs.service_path || '.' }}
       system-name: ${{ inputs.service_name || 'frontend' }}
-      node-version: ${{ inputs.node_version || 20 }}
+      node-version: ${{ inputs.node_version || 24 }}
       fail-on-high: true
 
   build:
@@ -74,10 +74,10 @@ jobs:
       run:
         working-directory: ./${{ inputs.service_path || '.' }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
-          node-version: ${{ inputs.node_version || 20 }}
+          node-version: ${{ inputs.node_version || 24 }}
           cache: npm
           cache-dependency-path: "**/package-lock.json"
       - run: npm ci --ignore-scripts

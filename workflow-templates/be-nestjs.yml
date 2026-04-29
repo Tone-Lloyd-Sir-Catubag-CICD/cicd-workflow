@@ -24,7 +24,7 @@ on:
         description: "Node.js version"
         required: false
         type: number
-        default: 20
+        default: 24
       coverage_threshold:
         description: "Minimum coverage percentage"
         required: false
@@ -54,7 +54,7 @@ jobs:
       working-directory: ${{ inputs.service_path || '.' }}
       system-name: ${{ inputs.service_name || 'backend' }}
       backend-stack: nestjs
-      node-version: ${{ inputs.node_version || 20 }}
+      node-version: ${{ inputs.node_version || 24 }}
       coverage-threshold: ${{ inputs.coverage_threshold || 80 }}
       test-command: npm test
       run-parallel: false
@@ -65,7 +65,7 @@ jobs:
     with:
       working-directory: ${{ inputs.service_path || '.' }}
       system-name: ${{ inputs.service_name || 'backend' }}
-      node-version: ${{ inputs.node_version || 20 }}
+      node-version: ${{ inputs.node_version || 24 }}
       lint-command: npm run lint
 
   security:
@@ -74,7 +74,7 @@ jobs:
     with:
       working-directory: ${{ inputs.service_path || '.' }}
       system-name: ${{ inputs.service_name || 'backend' }}
-      node-version: ${{ inputs.node_version || 20 }}
+      node-version: ${{ inputs.node_version || 24 }}
       fail-on-high: true
 
   docker:

@@ -42,7 +42,7 @@ jobs:
       working-directory: .
       system-name: backend
       backend-stack: nestjs
-      node-version: 20
+      node-version: 24
       test-command: npm test
       run-parallel: false
 ```
