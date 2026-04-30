@@ -37,6 +37,23 @@ and mobile should be added later as catalog-backed shapes.
 | `workflow-templates/be-nodejs.yml` | Node.js backend baseline: tests, lint, security, optional Docker. |
 | `workflow-templates/be-nestjs.yml` | NestJS backend baseline: tests, lint, security, optional Docker. |
 
+## GitHub Repository Setup For MVP Smoke
+
+Generated consumer templates call reusable workflows from:
+
+```text
+Tone-Lloyd-Sir-Catubag-CICD/central-workflow/.github/workflows/<workflow>.yml@v1
+```
+
+Before the local MVP smoke, the GitHub repository
+`Tone-Lloyd-Sir-Catubag-CICD/central-workflow` must exist, contain the current
+workflow library files, and expose a `v1` ref pointing at the validated commit.
+For the smoke, keep this repository public so newly created private test repos
+can call the reusable workflows without private reusable-workflow access policy
+getting in the way. After the MVP loop is proven, the repository can move back
+to private access with an org-owned repo creation model or a stricter GitHub
+Actions access policy.
+
 ## Rules
 
 - `.yml` files are GitHub Actions workflows or reusable workflow templates.
